@@ -2,7 +2,6 @@
 // Deploy with "Verify JWT" OFF. Secrets: ADMIN_PASSWORD, SESSION_SECRET, SITE_URL,
 // optional RESEND_API_KEY, FROM_EMAIL, NOTIFY_EMAIL, SLACK_WEBHOOK_URL, BRAND_NAME, SENDER_NAME.
 import postgres from 'npm:postgres@3.4.5';
-import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
 
 const env = (k: string, d = '') => Deno.env.get(k) ?? d;
 const ADMIN_PASSWORD = env('ADMIN_PASSWORD');
@@ -13,7 +12,7 @@ const SENDER = env('SENDER_NAME', 'Jude');
 const BUCKET = 'decks';
 
 const sql = postgres(env('SUPABASE_DB_URL') || env('DATABASE_URL'), {
-  prepare: false, max: 3, idle_timeout: 20,
+  prepare: false, max: 6, idle_timeout: 20,
   types: {
     int8: { to: 20, from: [20], serialize: (x: unknown) => String(x), parse: (x: string) => Number(x) },
     numeric: { to: 1700, from: [1700], serialize: (x: unknown) => String(x), parse: (x: string) => Number(x) },
@@ -73,38 +72,62 @@ let ready: Promise<void> | null = null;
 const bootstrap = () => (ready ??= (async () => {
   const has = await one(`SELECT to_regclass('public.links') t`);
   if (!has?.t) await sql.unsafe(SCHEMA);
-  if (sb) { const { data } = await sb.storage.getBucket(BUCKET); if (!data) await sb.storage.createBucket(BUCKET, { public: false }); }
+  if (!LOCAL) { const r = await sfetch(`/bucket/${BUCKET}`); await r.body?.cancel(); if (r.status !== 200) await sfetch('/bucket', { id: BUCKET, name: BUCKET, public: false }); }
 })().catch((e) => { ready = null; throw e; }));
 
 // ---------- storage (Supabase, or local folder for tests) ----------
 const LOCAL = env('LOCAL_STORAGE_DIR');
-const sb = LOCAL ? null : createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { auth: { persistSession: false } });
+const SB_URL = env('SUPABASE_URL').replace(/\/$/, '');
+const SB_KEY = env('SUPABASE_SERVICE_ROLE_KEY');
+// Storage REST, no SDK: smaller cold start
+function sfetch(path: string, body?: unknown, method?: string, extra: Record<string, string> = {}) {
+  return fetch(`${SB_URL}/storage/v1${path}`, {
+    method: method || (body === undefined ? 'GET' : 'POST'),
+    headers: { authorization: `Bearer ${SB_KEY}`, apikey: SB_KEY, 'content-type': 'application/json', ...extra },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+async function sjson(path: string, body?: unknown, method?: string, extra?: Record<string, string>) {
+  const r = await sfetch(path, body, method, extra);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`storage ${r.status}: ${j.message || j.error || ''}`);
+  return j;
+}
+const encPath = (p: string) => p.split('/').map(encodeURIComponent).join('/');
+const urlCache = new Map<string, { exp: number; urls: string[] }>();
 let FN_BASE = '';
 const store = {
   async uploadUrl(path: string) {
     if (LOCAL) return `${FN_BASE}/_local/put?p=${encodeURIComponent(path)}&s=${await sign('put:' + path)}`;
-    const { data, error } = await sb!.storage.from(BUCKET).createSignedUploadUrl(path, { upsert: true });
-    if (error) throw error; return data.signedUrl;
+    const j = await sjson(`/object/upload/sign/${BUCKET}/${encPath(path)}`, {}, 'POST', { 'x-upsert': 'true' });
+    return `${SB_URL}/storage/v1${j.url}`;
   },
   async urls(paths: string[], ttl: number, download?: string) {
     if (!paths.length) return [];
     if (LOCAL) return Promise.all(paths.map(async (p) => `${FN_BASE}/_local/get?p=${encodeURIComponent(p)}&s=${await sign('get:' + p)}`));
     if (download) {
-      const { data, error } = await sb!.storage.from(BUCKET).createSignedUrl(paths[0], ttl, { download });
-      if (error) throw error; return [data.signedUrl];
+      const j = await sjson(`/object/sign/${BUCKET}/${encPath(paths[0])}`, { expiresIn: ttl });
+      return [`${SB_URL}/storage/v1${j.signedURL}&download=${encodeURIComponent(download)}`];
     }
-    const { data, error } = await sb!.storage.from(BUCKET).createSignedUrls(paths, ttl);
-    if (error) throw error; return data.map((d: any) => d.signedUrl);
+    // signed links are reused until half their life is gone, so browsers can cache the slide images
+    const key = ttl + '|' + paths.join(',');
+    const hit = urlCache.get(key);
+    if (hit && hit.exp > now()) return hit.urls;
+    const j = await sjson(`/object/sign/${BUCKET}`, { expiresIn: ttl, paths });
+    const urls = j.map((d: any) => (d.signedURL ? `${SB_URL}/storage/v1${d.signedURL}` : ''));
+    if (urlCache.size > 500) urlCache.clear();
+    urlCache.set(key, { exp: now() + (ttl * 1000) / 2, urls });
+    return urls;
   },
   async removePrefix(prefix: string) {
     if (LOCAL) { await Deno.remove(`${LOCAL}/${prefix}`, { recursive: true }).catch(() => {}); return; }
     const all: string[] = [];
     const walk = async (p: string) => {
-      const { data } = await sb!.storage.from(BUCKET).list(p, { limit: 1000 });
+      const data = await sjson(`/object/list/${BUCKET}`, { prefix: p, limit: 1000, offset: 0 });
       for (const f of data || []) { const full = `${p}/${f.name}`; if (f.id) all.push(full); else await walk(full); }
     };
     await walk(prefix);
-    for (let i = 0; i < all.length; i += 100) await sb!.storage.from(BUCKET).remove(all.slice(i, i + 100));
+    for (let i = 0; i < all.length; i += 100) await sjson(`/object/${BUCKET}`, { prefixes: all.slice(i, i + 100) }, 'DELETE');
   },
 };
 
@@ -181,11 +204,15 @@ async function visitorRows(where = '', ...args: unknown[]) {
       (SELECT COUNT(*) FROM events e WHERE e.visitor_id=v.id AND e.type='cta') cta,
       (SELECT COUNT(*) FROM events e WHERE e.visitor_id=v.id AND e.type='download') downloads
     FROM visitors v LEFT JOIN links l ON l.id=v.link_id ${where} ORDER BY v.last_seen DESC`, ...args);
-  const totalPages = Object.fromEntries((await q('SELECT id, pages FROM documents')).map((d) => [d.id, d.pages]));
-  const seen = await q(`SELECT s.visitor_id, pt.doc_id, COUNT(DISTINCT pt.page) n FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE pt.ms>=1500 GROUP BY s.visitor_id, pt.doc_id`);
+  const [docsP, seen, invs] = await Promise.all([
+    q('SELECT id, pages FROM documents'),
+    q(`SELECT s.visitor_id, pt.doc_id, COUNT(DISTINCT pt.page) n FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE pt.ms>=1500 GROUP BY s.visitor_id, pt.doc_id`),
+    q('SELECT * FROM investors'),
+  ]);
+  const totalPages = Object.fromEntries(docsP.map((d) => [d.id, d.pages]));
   const comp: Record<string, number> = {};
   seen.forEach((r) => { const tp = totalPages[r.doc_id] || 1; comp[r.visitor_id] = Math.max(comp[r.visitor_id] || 0, Math.min(1, r.n / tp)); });
-  const inv = Object.fromEntries((await q('SELECT * FROM investors')).map((i) => [i.email, i]));
+  const inv = Object.fromEntries(invs.map((i) => [i.email, i]));
   return rows.map((r) => {
     const o: any = { ...r, completion: comp[r.id] || 0, investor: inv[r.email] || null };
     o.score = score(o); o.heat = o.score >= 70 ? 'hot' : o.score >= 40 ? 'warm' : 'cold';
@@ -195,8 +222,11 @@ async function visitorRows(where = '', ...args: unknown[]) {
 async function pageStats(docId: string, where = '', ...args: unknown[]) {
   const doc = await one('SELECT * FROM documents WHERE id=?', docId);
   if (!doc || !doc.version) return null;
-  const rows = await q(`SELECT pt.page, SUM(pt.ms) ms, COUNT(DISTINCT s.visitor_id) reached FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE pt.doc_id=? AND pt.ms>=1000 ${where} GROUP BY pt.page`, docId, ...args);
-  const viewers = (await one(`SELECT COUNT(DISTINCT s.visitor_id) n FROM sessions s WHERE s.id IN (SELECT session_id FROM page_time WHERE doc_id=?) ${where}`, docId, ...args)).n || 0;
+  const [rows, vrow] = await Promise.all([
+    q(`SELECT pt.page, SUM(pt.ms) ms, COUNT(DISTINCT s.visitor_id) reached FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE pt.doc_id=? AND pt.ms>=1000 ${where} GROUP BY pt.page`, docId, ...args),
+    one(`SELECT COUNT(DISTINCT s.visitor_id) n FROM sessions s WHERE s.id IN (SELECT session_id FROM page_time WHERE doc_id=?) ${where}`, docId, ...args),
+  ]);
+  const viewers = vrow.n || 0;
   const m = Object.fromEntries(rows.map((r) => [r.page, r]));
   const pages = [];
   for (let p = 1; p <= doc.pages; p++) {
@@ -352,11 +382,10 @@ async function viewer(c: Ctx, slug: string, action: string, sub: string[]): Prom
 
   const g = await viewerGuard(c, slug);
   if (action === 'content') {
-    const docs = [];
-    for (const id of g.docIds) {
+    const docs = (await Promise.all(g.docIds.map(async (id) => {
       const d = await one('SELECT id,name,pages,ratio,version FROM documents WHERE id=? AND version>0', id);
-      if (d) docs.push({ ...d, urls: await docAssets(d, 4 * 3600, 'page') });
-    }
+      return d ? { ...d, urls: await docAssets(d, 4 * 3600, 'page') } : null;
+    }))).filter(Boolean);
     return { docs, allowDownload: !!g.l.allow_download, cta: g.l.cta_url ? { url: g.l.cta_url, label: g.l.cta_label || 'Book a Call' } : null,
       watermark: g.l.watermark ? `${g.v.email || 'Confidential'} · ${new Date().toISOString().slice(0, 10)} · ${BRAND} confidential` : '', viewer: { email: g.v.email, name: g.v.name } };
   }
@@ -430,7 +459,7 @@ async function admin(c: Ctx, parts: string[], method: string): Promise<any> {
   if (res === 'docs') {
     if (!id && method === 'GET') {
       const docs = await q('SELECT * FROM documents WHERE version>0 ORDER BY created_at DESC');
-      for (const d of docs) { d.thumbs = await docAssets(d, 12 * 3600, 'thumb'); d.pageUrls = await docAssets(d, 12 * 3600, 'page'); }
+      await Promise.all(docs.map(async (d: any) => { d.thumbs = await docAssets(d, 12 * 3600, 'thumb'); }));
       return docs;
     }
     if (!id && method === 'POST') { // reserve a version and hand out upload URLs
@@ -454,6 +483,7 @@ async function admin(c: Ctx, parts: string[], method: string): Promise<any> {
       if (old) bg(store.removePrefix(`${id}/v${old}`));
       return { ok: true };
     }
+    if (id && sub === 'pages') { const d = await one('SELECT * FROM documents WHERE id=?', id); if (!d) fail(404, 'no doc'); return { urls: await docAssets(d, 12 * 3600, 'page') }; }
     if (id && method === 'PATCH') { await q('UPDATE documents SET name=? WHERE id=?', clean(b.name, 120), id); return { ok: true }; }
     if (id && method === 'DELETE') { await q('DELETE FROM documents WHERE id=?', id); bg(store.removePrefix(id)); return { ok: true }; }
   }
@@ -509,16 +539,19 @@ async function admin(c: Ctx, parts: string[], method: string): Promise<any> {
     return { ok: true };
   }
   if (res === 'overview') {
-    const visitors = await visitorRows();
-    const sess = await one('SELECT COUNT(*) views, COALESCE(SUM(duration),0) ms FROM sessions');
-    const docs = await q('SELECT * FROM documents WHERE version>0 ORDER BY updated_at DESC');
+    const [visitors, sess, docs, events, days, lc] = await Promise.all([
+      visitorRows(),
+      one('SELECT COUNT(*) views, COALESCE(SUM(duration),0) ms FROM sessions'),
+      q('SELECT * FROM documents WHERE version>0 ORDER BY updated_at DESC'),
+      q(`SELECT e.*, v.email, v.name, l.name link_name FROM events e LEFT JOIN visitors v ON v.id=e.visitor_id LEFT JOIN links l ON l.id=e.link_id ORDER BY e.created_at DESC LIMIT 40`),
+      q(`SELECT to_char(to_timestamp(started_at/1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') d, COUNT(*) n, COUNT(DISTINCT visitor_id) u FROM sessions WHERE started_at > ? GROUP BY 1`, now() - 30 * 864e5),
+      one('SELECT COUNT(*) n FROM links WHERE active=1'),
+    ]);
     const docId = c.url.searchParams.get('doc') || docs[0]?.id;
-    const events = await q(`SELECT e.*, v.email, v.name, l.name link_name FROM events e LEFT JOIN visitors v ON v.id=e.visitor_id LEFT JOIN links l ON l.id=e.link_id ORDER BY e.created_at DESC LIMIT 40`);
-    const days = await q(`SELECT to_char(to_timestamp(started_at/1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') d, COUNT(*) n, COUNT(DISTINCT visitor_id) u FROM sessions WHERE started_at > ? GROUP BY 1`, now() - 30 * 864e5);
     return {
       kpi: { views: sess.views, visitors: visitors.length, totalMs: sess.ms, avgMs: visitors.length ? sess.ms / visitors.length : 0,
         avgCompletion: visitors.length ? visitors.reduce((a: number, v: any) => a + v.completion, 0) / visitors.length : 0,
-        hot: visitors.filter((v: any) => v.heat === 'hot').length, links: (await one('SELECT COUNT(*) n FROM links WHERE active=1')).n },
+        hot: visitors.filter((v: any) => v.heat === 'hot').length, links: lc.n },
       hot: visitors.slice().sort((a: any, b: any) => b.score - a.score).slice(0, 8), events, days, docs, deck: docId ? await pageStats(docId) : null,
     };
   }
@@ -528,10 +561,14 @@ async function admin(c: Ctx, parts: string[], method: string): Promise<any> {
   }
   if (res === 'visitors' && id) {
     const v = (await visitorRows('WHERE v.id=?', id))[0]; if (!v) fail(404, 'not found');
-    const sessions = await q('SELECT * FROM sessions WHERE visitor_id=? ORDER BY started_at DESC', v.id);
-    const docIds = (await q('SELECT DISTINCT pt.doc_id FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE s.visitor_id=?', v.id)).map((r) => r.doc_id);
-    const decks = []; for (const d of docIds) { const s = await pageStats(d, 'AND s.visitor_id=?', v.id); if (s) decks.push(s); }
-    return { visitor: v, sessions, decks, messages: await q('SELECT * FROM messages WHERE visitor_id=? ORDER BY created_at DESC', v.id), events: await q('SELECT * FROM events WHERE visitor_id=? ORDER BY created_at DESC LIMIT 100', v.id) };
+    const [sessions, docRows, messages, events] = await Promise.all([
+      q('SELECT * FROM sessions WHERE visitor_id=? ORDER BY started_at DESC', v.id),
+      q('SELECT DISTINCT pt.doc_id FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE s.visitor_id=?', v.id),
+      q('SELECT * FROM messages WHERE visitor_id=? ORDER BY created_at DESC', v.id),
+      q('SELECT * FROM events WHERE visitor_id=? ORDER BY created_at DESC LIMIT 100', v.id),
+    ]);
+    const decks = (await Promise.all(docRows.map((r) => pageStats(r.doc_id, 'AND s.visitor_id=?', v.id)))).filter(Boolean);
+    return { visitor: v, sessions, decks, messages, events };
   }
   if (res === 'messages') return q(`SELECT m.*, v.email, v.name, l.name link_name, d.name doc_name FROM messages m LEFT JOIN visitors v ON v.id=m.visitor_id LEFT JOIN links l ON l.id=m.link_id LEFT JOIN documents d ON d.id=m.doc_id ORDER BY m.created_at DESC`);
   if (res === 'export') {
