@@ -31,7 +31,9 @@
   const initials = (s) => (s || '?').replace(/@.*/, '').split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((x) => x[0].toUpperCase()).join('') || '?';
   const avColors = [['#EBCFBE', '#B0451A'], ['#CFDEE8', '#2C6E8F'], ['#CDE0D3', '#3E7C5A'], ['#E6BE9E', '#8a3a12'], ['#DCBFC8', '#8A3F4E'], ['#E4CD97', '#7a570c']];
   const av = (s) => { let h = 0; for (const c of s || '') h = (h * 31 + c.charCodeAt(0)) >>> 0; const [b, f] = avColors[h % avColors.length]; return `<span class="av" style="background:${b};color:${f}">${esc(initials(s))}</span>`; };
-  const STAGES = ['Shared', 'Viewed', 'Engaged', 'Meeting', 'Due diligence', 'Committed', 'Passed'];
+  const STAGES = ['Shared', 'Viewed', 'Engaged', 'Meeting', 'Proposal', 'Due diligence', 'Won', 'Committed', 'Lost', 'Passed'];
+  const isOwner = () => ME && ME.user && ME.user.role === 'owner';
+  const ownerChip = (name, mine) => (isOwner() && name && !mine ? `<span class="chip off">${esc(name.split(' ')[0])}</span>` : '');
   const thumb = (doc, n) => { const d = DOCS.find((x) => x.id === doc); return (d && d.thumbs && d.thumbs[n - 1]) || ''; };
   const heatChip = (v) => `<span class="chip ${v.heat}">${v.heat === 'hot' ? icon('flame') : ''}${v.heat[0].toUpperCase() + v.heat.slice(1)} · ${v.score}</span>`;
   let ME = null;
@@ -40,17 +42,20 @@
   function showLogin() { $('#shell').hidden = true; $('#login').hidden = false; }
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
-    let r; try { r = await fetch(API + '/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: e.target.password.value }) }); } catch { $('#loginErr').textContent = 'Cannot reach the server. Check config.js'; return; }
+    let r; try { r = await fetch(API + '/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: e.target.email.value, password: e.target.password.value }) }); } catch { $('#loginErr').textContent = 'Cannot reach the server. Check config.js'; return; }
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) { $('#loginErr').textContent = j.error || 'Wrong password'; return; }
+    if (!r.ok) { $('#loginErr').textContent = j.error || 'Wrong email or password'; return; }
     tok.set(j.token);
     start();
   };
   $('#logout').onclick = () => { tok.set(null); showLogin(); };
   async function start() {
     try { [ME] = await Promise.all([api('/me'), loadDocs()]); } catch { return; }
-    $('#login').hidden = true; $('#shell').hidden = false; hydrateIcons();
-    route(); refreshMsgCount();
+    $('#login').hidden = true; $('#shell').hidden = false;
+    $('#navTeam').hidden = !isOwner();
+    $('#meName').textContent = ME.user.name || ME.user.email; $('#meRole').textContent = isOwner() ? 'Owner' : (ME.user.title || 'Team');
+    $('#meAv').outerHTML = av(ME.user.email).replace('class="av"', 'class="av" id="meAv"');
+    hydrateIcons(); route(); refreshMsgCount();
   }
   async function refreshMsgCount() { try { const m = await api('/messages'); const n = m.filter((x) => Date.now() - x.created_at < 7 * 864e5).length; $('#msgCount').textContent = n || ''; } catch {} }
 
@@ -60,9 +65,9 @@
     const h = location.hash.replace(/^#\/?/, '');
     const [r, arg] = h.split('/');
     const key = r || 'overview';
-    $$('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.r === key || (key === 'visitor' && a.dataset.r === 'investors') || (key === 'link' && a.dataset.r === 'links')));
+    $$('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.r === key || (key === 'visitor' && a.dataset.r === 'investors') || (key === 'profile' && a.dataset.r === 'settings') || (key === 'link' && a.dataset.r === 'links')));
     const old = $('#main'); const m = old.cloneNode(false); old.replaceWith(m); m.innerHTML = '<div class="empty">Loading…</div>';
-    const views = { overview, investors, visitor: () => visitor(arg), links, link: () => linkView(arg), docs, messages, settings };
+    const views = { overview, investors, visitor: () => visitor(arg), links, link: () => linkView(arg), docs, messages, settings, team };
     (views[key] || overview)().then(() => hydrateIcons(m)).catch((e) => { if (e.message !== 'auth') m.innerHTML = `<div class="empty"><b>Something went wrong</b>${esc(e.message)}</div>`; });
     scrollTo(0, 0);
   }
@@ -112,24 +117,24 @@
     const k = d.kpi;
     const evMeta = { open: ['eye', '#CFDEE8', '#2C6E8F', 'opened'], return: ['return', '#E4CD97', '#7a570c', 'came back to'], verified: ['check', '#CDE0D3', '#3E7C5A', 'verified email on'], forwarded: ['forward', '#DCBFC8', '#8A3F4E', 'opened a forwarded link'], download: ['download', '#EBCFBE', '#B0451A', 'downloaded'], message: ['chat', '#EBCFBE', '#B0451A', 'asked a question on'], cta: ['star', '#F1DD93', '#7a570c', 'clicked book a call on'], blocked: ['lock', '#EEE1CF', '#6B4A2F', 'was blocked from'] };
     $('#main').innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Seed round</p><h1>Who is reading the deck.</h1></div><div class="acts"><button class="btn ghost" data-export>${icon('download')}Export CSV</button><button class="btn" id="nl">Share the Deck<span class="arr">↗</span></button></div></div>
+      <div class="ph"><div><p class="eyebrow">${isOwner() ? 'Whole team' : 'Your links'}</p><h1>Who is reading your files.</h1></div><div class="acts"><button class="btn ghost" data-export>${icon('download')}Export CSV</button><button class="btn" id="nl">Share a File<span class="arr">↗</span></button></div></div>
       <div class="kpis">
         <div class="kpi t-c"><div class="l">${icon('eye')}Total views</div><div class="v">${k.views}</div><div class="s">${k.links} active links</div></div>
         <div class="kpi t-p"><div class="l">${icon('users')}Unique viewers</div><div class="v">${k.visitors}</div><div class="s">identified by email</div></div>
         <div class="kpi t-f"><div class="l">${icon('clock')}Avg time per viewer</div><div class="v">${dur(k.avgMs)}</div><div class="s">${dur(k.totalMs)} total</div></div>
         <div class="kpi t-i"><div class="l">${icon('check')}Avg completion</div><div class="v">${pct(k.avgCompletion)}</div><div class="s">slides seen</div></div>
-        <div class="kpi hotk"><div class="l">${icon('flame')}Hot investors</div><div class="v">${k.hot}</div><div class="s">score 70+</div></div>
+        <div class="kpi hotk"><div class="l">${icon('flame')}Hot contacts</div><div class="v">${k.hot}</div><div class="s">score 70+</div></div>
       </div>
       <div class="grid2">
         <div class="stack">
-          <div class="card"><h2>Where investors spend time. ${d.docs.length > 1 ? `<select class="stage" id="docSwitch">${d.docs.map((x) => `<option value="${x.id}" ${d.deck && x.id === d.deck.doc.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : `<small>${d.deck ? esc(d.deck.doc.name) + ' · ' + d.deck.viewers + ' viewers' : ''}</small>`}</h2>
-            ${d.deck ? (d.deck.viewers ? slideChart(d.deck) : '<div class="empty"><b>No views yet</b>Share a link to start collecting slide analytics.</div>') : '<div class="empty"><b>No deck uploaded</b><a href="#/docs">Upload a PDF</a></div>'}
+          <div class="card"><h2>Where people spend time. ${d.docs.length > 1 ? `<select class="stage" id="docSwitch">${d.docs.map((x) => `<option value="${x.id}" ${d.deck && x.id === d.deck.doc.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : `<small>${d.deck ? esc(d.deck.doc.name) + ' · ' + d.deck.viewers + ' viewers' : ''}</small>`}</h2>
+            ${d.deck ? (d.deck.viewers ? slideChart(d.deck) : '<div class="empty"><b>No views yet</b>Share a link to start collecting slide analytics.</div>') : '<div class="empty"><b>No files yet</b><a href="#/docs">Upload a PDF</a></div>'}
           </div>
           ${d.deck ? `<div class="card"><h2>Slide heatmap. <small>Orange outline marks the top 3 slides</small></h2>${slideGrid(d.deck, d.deck.doc.id)}</div>` : ''}
           <div class="card"><h2>Views, last 30 days.</h2>${daysChart(d.days)}</div>
         </div>
         <div class="stack">
-          <div class="card"><h2>Most engaged. <a href="#/investors" class="muted" style="font-size:12px;font-weight:400">All investors</a></h2>
+          <div class="card"><h2>Most engaged. <a href="#/investors" class="muted" style="font-size:12px;font-weight:400">All contacts</a></h2>
             ${d.hot.length ? `<div class="feed">${d.hot.map((v) => `<div class="ev"><a href="#/visitor/${v.id}" style="text-decoration:none">${av(v.email || v.name)}</a><div class="t"><a href="#/visitor/${v.id}">${esc(v.investor?.name || v.name || v.email || 'Anonymous')}</a><div class="muted" style="font-size:12px">${esc(v.investor?.firm || v.email)} · ${dur(v.ms)} · ${pct(v.completion)}</div></div>${heatChip(v)}</div>`).join('')}</div>` : '<div class="empty">No viewers yet</div>'}
           </div>
           <div class="card"><h2>Live activity.</h2>
@@ -147,16 +152,16 @@
     const { visitors, pending } = await api('/visitors');
     const m = $('#main');
     m.innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Pipeline</p><h1>Investors.</h1><p>Everyone who opened a link, ranked by engagement.</p></div><div class="acts"><button class="btn ghost" data-export>${icon('download')}Export CSV</button></div></div>
-      <div class="filters"><input id="q" placeholder="Search name, email, firm"><select id="fh"><option value="">All heat</option><option>hot</option><option>warm</option><option>cold</option></select><select id="fs"><option value="">All stages</option>${STAGES.map((s) => `<option>${s}</option>`).join('')}</select><select id="sort"><option value="last">Last seen</option><option value="score">Engagement</option><option value="ms">Time spent</option></select></div>
-      <div class="card"><div class="tw"><table><thead><tr><th>Investor</th><th>Engagement</th><th>Stage</th><th>Time</th><th>Completion</th><th>Visits</th><th>Location</th><th>Last seen</th></tr></thead><tbody id="tb"></tbody></table></div></div>
+      <div class="ph"><div><p class="eyebrow">Pipeline</p><h1>Contacts.</h1><p>Investors and clients who opened a link, ranked by engagement.</p></div><div class="acts"><button class="btn ghost" data-export>${icon('download')}Export CSV</button></div></div>
+      <div class="filters"><input id="q" placeholder="Search name, email, company"><select id="fh"><option value="">All heat</option><option>hot</option><option>warm</option><option>cold</option></select><select id="fs"><option value="">All stages</option>${STAGES.map((s) => `<option>${s}</option>`).join('')}</select><select id="sort"><option value="last">Last seen</option><option value="score">Engagement</option><option value="ms">Time spent</option></select></div>
+      <div class="card"><div class="tw"><table><thead><tr><th>Contact</th><th>Engagement</th><th>Stage</th><th>Time</th><th>Completion</th><th>Visits</th><th>Location</th><th>Last seen</th></tr></thead><tbody id="tb"></tbody></table></div></div>
       ${pending.length ? `<div class="card"><h2>Shared, not opened yet. <small>${pending.length}</small></h2><div class="tw"><table><tbody>${pending.map((p) => `<tr><td><div class="who">${av(p.email)}<div><b>${esc(p.name || p.email)}</b><span>${esc(p.firm || p.email)}</span></div></div></td><td><span class="chip off">Not opened</span></td><td class="muted">${ago(p.updated_at)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
     const draw = () => {
       const q = $('#q').value.toLowerCase(), fh = $('#fh').value, fs = $('#fs').value, so = $('#sort').value;
       let rows = visitors.filter((v) => (!q || [v.email, v.name, v.investor?.name, v.investor?.firm].join(' ').toLowerCase().includes(q)) && (!fh || v.heat === fh) && (!fs || v.investor?.stage === fs));
       rows.sort((a, b) => (so === 'score' ? b.score - a.score : so === 'ms' ? b.ms - a.ms : b.last_seen - a.last_seen));
       $('#tb').innerHTML = rows.length ? rows.map((v) => `<tr class="click" data-id="${v.id}">
-        <td><div class="who">${av(v.email || v.name)}<div><b>${esc(v.investor?.name || v.name || v.email || 'Anonymous')}${v.forwarded ? ' <span class="chip fw">Forwarded</span>' : ''}</b><span>${esc([v.investor?.firm, v.email].filter(Boolean).join(' · '))}</span></div></div></td>
+        <td><div class="who">${av(v.email || v.name)}<div><b>${esc(v.investor?.name || v.name || v.email || 'Anonymous')}${v.forwarded ? ' <span class="chip fw">Forwarded</span>' : ''} ${ownerChip(v.owner_name, v.owner_id === ME.user.id)}</b><span>${esc([v.investor?.firm, v.email].filter(Boolean).join(' · '))}</span></div></div></td>
         <td>${heatChip(v)}</td>
         <td>${v.email ? `<select class="stage" data-e="${esc(v.email)}">${STAGES.map((s) => `<option ${v.investor?.stage === s ? 'selected' : ''}>${s}</option>`).join('')}</select>` : '<span class="muted">n/a</span>'}</td>
         <td class="num">${dur(v.ms)}</td><td><div style="display:flex;align-items:center;gap:8px"><div class="bar"><div style="width:${pct(v.completion)}"></div></div><span class="num">${pct(v.completion)}</span></div></td>
@@ -174,7 +179,7 @@
     const ring = (p, c) => `<div class="ring" style="--p:${p};--c:${c}"><span>${p}</span></div>`;
     const evName = { open: 'Opened the deck', return: 'Came back', verified: 'Verified email', forwarded: 'Opened a forwarded link', download: 'Downloaded the PDF', message: 'Asked a question', cta: 'Clicked book a call' };
     $('#main').innerHTML = `
-      <div class="ph"><div class="vh">${av(v.email || v.name)}<div><p class="eyebrow"><a href="#/investors">Investors</a></p><h1>${esc(inv.name || v.name || v.email || 'Anonymous viewer')}</h1><p>${esc([inv.firm, v.email].filter(Boolean).join(' · '))} ${v.forwarded ? '<span class="chip fw">Forwarded link</span>' : ''}</p></div></div>
+      <div class="ph"><div class="vh">${av(v.email || v.name)}<div><p class="eyebrow"><a href="#/investors">Contacts</a></p><h1>${esc(inv.name || v.name || v.email || 'Anonymous viewer')}</h1><p>${esc([inv.firm, v.email].filter(Boolean).join(' · '))} ${v.forwarded ? '<span class="chip fw">Forwarded link</span>' : ''}</p></div></div>
         <div class="acts" style="align-items:center">${ring(v.score, v.heat === 'hot' ? '#C0501E' : v.heat === 'warm' ? '#C88E24' : '#2C6E8F')}${v.email ? `<a class="btn ghost" href="mailto:${esc(v.email)}">${icon('chat')}Email</a>` : ''}</div></div>
       <div class="kpis">
         <div class="kpi"><div class="l">${icon('clock')}Time on deck</div><div class="v">${dur(v.ms)}</div></div>
@@ -190,7 +195,7 @@
         </div>
         <div class="stack">
           ${v.email ? `<div class="card"><h2>Pipeline.</h2><div class="form">
-            <div class="two"><label class="fld">Name<input id="iName" value="${esc(inv.name || v.name || '')}"></label><label class="fld">Firm<input id="iFirm" value="${esc(inv.firm || '')}"></label></div>
+            <div class="two"><label class="fld">Name<input id="iName" value="${esc(inv.name || v.name || '')}"></label><label class="fld">Company<input id="iFirm" value="${esc(inv.firm || '')}"></label></div>
             <label class="fld">Stage<select id="iStage">${STAGES.map((s) => `<option ${inv.stage === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
             <label class="fld">Notes<textarea class="notes" id="iNotes" placeholder="Call notes, cheque size, follow up date">${esc(inv.notes || '')}</textarea></label>
             <div><button class="btn sm" id="iSave">Save</button></div></div></div>` : ''}
@@ -211,11 +216,11 @@
     const ls = await api('/links'); const docs = DOCS;
     const dn = Object.fromEntries(docs.map((d) => [d.id, d.name]));
     $('#main').innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Sharing</p><h1>Links.</h1><p>One link can go to everyone. Each person who opens it is tracked by their email.</p></div><div class="acts"><button class="btn" id="nl">New Link<span class="arr">↗</span></button></div></div>
-      <div class="card"><div class="tw"><table><thead><tr><th>Link</th><th>URL</th><th>Access</th><th>Views</th><th>Time</th><th>Last view</th><th></th></tr></thead><tbody>
+      <div class="ph"><div><p class="eyebrow">Sharing</p><h1>Links.</h1><p>${isOwner() ? 'Every link on the team. ' : ''}One link can go to everyone. Each person who opens it is tracked by their email.</p></div><div class="acts"><button class="btn" id="nl">New Link<span class="arr">↗</span></button></div></div>
+      <div class="card"><div class="tw"><table><thead><tr><th>Link</th>${isOwner() ? '<th>Owner</th>' : ''}<th>URL</th><th>Access</th><th>Views</th><th>Time</th><th>Last view</th><th></th></tr></thead><tbody>
       ${ls.map((l) => { const url = `${ME.siteUrl}/${l.slug}`; const exp = l.expires_at && l.expires_at < Date.now();
         return `<tr class="click" data-id="${l.id}"><td><div class="who">${av(l.investor_name || l.name || l.slug)}<div><b>${esc(l.name || l.investor_name || l.slug)}</b><span>${esc([l.firm, l.investor_email, l.doc_ids.map((d) => dn[d]).filter(Boolean).join(', ')].filter(Boolean).join(' · '))}</span></div></div></td>
-        <td><span class="linkurl" title="${esc(url)}">/v/${esc(l.slug)}</span></td>
+        ${isOwner() ? `<td>${l.mine ? '<span class="muted">You</span>' : esc(l.owner_name || '')}</td>` : ''}<td><span class="linkurl" title="${esc(url)}">/${esc(l.slug)}</span></td>
         <td><div style="display:flex;gap:4px;flex-wrap:wrap">${!l.active ? '<span class="chip off">Revoked</span>' : exp ? '<span class="chip off">Expired</span>' : '<span class="chip ok">Live</span>'}${l.verify_email ? '<span class="chip cold">Verified email</span>' : l.require_email ? '<span class="chip cold">Email</span>' : '<span class="chip off">Open</span>'}${l.has_password ? `<span class="chip cold">${icon('lock')}</span>` : ''}</div></td>
         <td class="num">${l.stats.views} <span class="muted">/ ${l.stats.visitors} people</span></td><td class="num">${dur(l.stats.ms)}</td><td class="muted">${ago(l.stats.last)}</td>
         <td style="white-space:nowrap"><button class="btn sm ghost" data-copy="${esc(url)}">${icon('copy')}Copy</button> <button class="btn sm ghost" data-edit="${l.id}">Edit</button></td></tr>`; }).join('') || `<tr><td colspan="7"><div class="empty"><b>No links yet</b>Create your first share link.</div></td></tr>`}
@@ -241,18 +246,18 @@
   }
   async function linkForm(l) {
     if (!DOCS.length) await loadDocs();
-    const edit = !!(l && l.id); l = Object.assign({ require_email: 1, verify_email: 0, allow_download: 0, watermark: 1, notify: 1, active: 1, doc_ids: DOCS[0] ? [DOCS[0].id] : [], cta_label: 'Book a Call' }, l || {});
+    const edit = !!(l && l.id); l = Object.assign({ require_email: 1, verify_email: 0, allow_download: 0, watermark: 1, notify: 1, active: 1, doc_ids: DOCS[0] ? [DOCS[0].id] : [], cta_label: 'Book a Call', cta_url: ME.user.cta_url || '' }, l || {});
     const tg = (k, t, s) => `<label class="tg"><input type="checkbox" name="${k}" ${l[k] ? 'checked' : ''}><span class="sw"></span><div><b>${t}</b><span>${s}</span></div></label>`;
     const dt = l.expires_at ? new Date(l.expires_at).toISOString().slice(0, 10) : '';
     openDrawer(`<form class="form" id="lf">
       <div><p class="eyebrow">${edit ? 'Edit link' : 'New link'}</p><h2>${edit ? esc(l.name || l.slug) : 'Share the deck.'}</h2></div>
-      <div class="fs"><b>Recipient (optional)</b><p class="muted" style="font-size:12.5px;margin-top:-6px">Leave blank for a link you send to many investors. Fill it in only for a personal link: it prefills their email and flags forwards.</p>
-        <div class="two"><label class="fld">Investor name<input name="investor_name" value="${esc(l.investor_name || '')}" placeholder="Tolu Adeyemi"></label><label class="fld">Firm<input name="firm" value="${esc(l.firm || '')}" placeholder="Fund name"></label></div>
-        <label class="fld">Investor email <small>Prefills the gate and flags forwards when someone else opens it</small><input name="investor_email" type="email" value="${esc(l.investor_email || '')}" placeholder="tolu@fund.com"></label>
-        <label class="fld">Internal link name <small>Only you see this</small><input name="name" value="${esc(l.name || '')}" placeholder="e.g. Seed round, Demo day, Tolu"></label>
+      <div class="fs"><b>Recipient (optional)</b><p class="muted" style="font-size:12.5px;margin-top:-6px">Leave blank for a link you send to many people. Fill it in only for a personal link: it prefills their email and flags forwards.</p>
+        <div class="two"><label class="fld">Name<input name="investor_name" value="${esc(l.investor_name || '')}" placeholder="Tolu Adeyemi"></label><label class="fld">Company<input name="firm" value="${esc(l.firm || '')}" placeholder="Fund name"></label></div>
+        <label class="fld">Email <small>Prefills the gate and flags forwards when someone else opens it</small><input name="investor_email" type="email" value="${esc(l.investor_email || '')}" placeholder="tolu@fund.com"></label>
+        <label class="fld">Internal link name <small>Only you see this</small><input name="name" value="${esc(l.name || '')}" placeholder="e.g. Seed round, Nahdi proposal, Tolu"></label>
       </div>
       <div class="fs"><b>Content</b>
-        <div class="docpick">${DOCS.map((d) => `<label><input type="checkbox" name="doc" value="${d.id}" ${l.doc_ids.includes(d.id) ? 'checked' : ''}><img src="${thumb(d.id, 1)}"><span><b>${esc(d.name)}</b><br><span class="muted">${d.pages} slides</span></span></label>`).join('') || '<p class="muted">Upload a deck first.</p>'}</div>
+        <div class="docpick">${DOCS.map((d) => `<label><input type="checkbox" name="doc" value="${d.id}" ${l.doc_ids.includes(d.id) ? 'checked' : ''}><img src="${thumb(d.id, 1)}"><span><b>${esc(d.name)}</b><br><span class="muted">${d.pages} pages${d.visibility === 'team' ? ' · Team' : ''}</span></span></label>`).join('') || '<p class="muted">Upload a deck first.</p>'}</div>
         <label class="fld">Custom URL <small>${esc(ME.siteUrl)}/</small><input name="slug" value="${esc(l.slug || '')}" placeholder="auto"></label>
         <label class="fld">Welcome note on the gate <small>Optional</small><textarea name="message" rows="2" placeholder="Great meeting you today. Here is the deck we discussed.">${esc(l.message || '')}</textarea></label>
       </div>
@@ -289,7 +294,7 @@
         if (edit) { await api('/links/' + l.id, { method: 'PATCH', body: JSON.stringify(b) }); closeDrawer(); toast('Saved'); route(); }
         else {
           const r = await api('/links', { method: 'POST', body: JSON.stringify(b) }); const url = `${ME.siteUrl}/${r.slug}`;
-          $('#drawerPanel').innerHTML = `<div class="form"><p class="eyebrow">Link ready</p><h2>Send this to ${esc(b.investor_name || 'your investor')}.</h2><div class="created"><div class="u">${esc(url)}</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn gold" id="cpy">Copy Link<span class="arr">↗</span></button>${b.investor_email ? `<a class="btn ghost" href="mailto:${esc(b.investor_email)}?subject=${encodeURIComponent((ME.brand || 'Oyster') + ' seed deck')}&body=${encodeURIComponent(`Hello ${(b.investor_name || '').split(' ')[0] || 'there'},\n\nHere is our deck: ${url}\n\nHappy to walk you through it.\n\n${ME.sender}`)}">${icon('chat')}Draft email</a>` : ''}<a class="btn ghost" href="${esc(url)}" target="_blank">${icon('eye')}Preview</a></div></div><div class="formacts"><button class="btn" id="dn">Done</button></div></div>`;
+          $('#drawerPanel').innerHTML = `<div class="form"><p class="eyebrow">Link ready</p><h2>Send this to ${esc(b.investor_name || 'them')}.</h2><div class="created"><div class="u">${esc(url)}</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn gold" id="cpy">Copy Link<span class="arr">↗</span></button>${b.investor_email ? `<a class="btn ghost" href="mailto:${esc(b.investor_email)}?subject=${encodeURIComponent((ME.brand || 'Oyster') + ': ' + ((DOCS.find((d) => d.id === b.doc_ids[0]) || {}).name || 'our deck'))}&body=${encodeURIComponent(`Hello ${(b.investor_name || '').split(' ')[0] || 'there'},\n\nHere it is: ${url}\n\nHappy to walk you through it.\n\n${ME.user.name || ''}`)}">${icon('chat')}Draft email</a>` : ''}<a class="btn ghost" href="${esc(url)}" target="_blank">${icon('eye')}Preview</a></div></div><div class="formacts"><button class="btn" id="dn">Done</button></div></div>`;
           hydrateIcons($('#drawerPanel'));
           $('#cpy').onclick = () => { navigator.clipboard.writeText(url); toast('Link copied'); };
           $('#dn').onclick = () => { closeDrawer(); if (location.hash.startsWith('#/links')) route(); else location.hash = '#/links'; };
@@ -319,14 +324,14 @@
     const r = await fetch(url, { method: 'PUT', body: blob, headers: { 'content-type': type, 'x-upsert': 'true' } });
     if (!r.ok) throw new Error('Upload failed (' + r.status + ')');
   }
-  async function uploadPdf(file, replaceId) {
+  async function uploadPdf(file, replaceId, visibility) {
     const lib = await loadPdfjs();
     toast('Reading PDF…');
     const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
     const n = pdf.numPages;
     const p1 = await pdf.getPage(1); const v1 = p1.getViewport({ scale: 1 }); const ratio = v1.height / v1.width;
     const name = file.name.replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim();
-    const res = await api('/docs', { method: 'POST', body: JSON.stringify({ name, pages: n, ratio, replaceId }) });
+    const res = await api('/docs', { method: 'POST', body: JSON.stringify({ name, pages: n, ratio, replaceId, visibility }) });
     for (let i = 1; i <= n; i++) {
       toast(`Processing slide ${i} of ${n}…`);
       const page = await pdf.getPage(i);
@@ -348,31 +353,34 @@
   document.addEventListener('click', async (e) => {
     if (!e.target.closest('[data-export]')) return;
     const r = await api('/export'); const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([r.csv], { type: 'text/csv' })); a.download = 'deckroom-investors.csv'; a.click();
+    a.href = URL.createObjectURL(new Blob([r.csv], { type: 'text/csv' })); a.download = 'deckroom-contacts.csv'; a.click();
   });
 
   // ---------- docs ----------
   async function docs() {
     await loadDocs();
     $('#main').innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Library</p><h1>Decks.</h1><p>Upload a new version anytime. Every existing link updates automatically.</p></div></div>
+      <div class="ph"><div><p class="eyebrow">Library</p><h1>Files.</h1><p>Decks, proposals and sales material. Upload a new version anytime and every link updates.</p></div><div class="acts"><div class="seg" id="docFilter"><button data-f="all" class="on">All</button><button data-f="team">Team</button><button data-f="mine">Mine</button></div></div></div>
       <div class="docs">
-        <label class="drop" id="drop"><input type="file" accept="application/pdf" hidden id="file"><div>${icon('upload')}<b>Upload a PDF.</b><p class="muted">Drop it here or click to browse</p></div></label>
-        ${DOCS.map((d) => `<div class="doc"><img src="${thumb(d.id, 1)}" data-pv="${d.id}" data-p="1"><div class="b"><h3>${esc(d.name)}</h3><span class="muted">${d.pages} slides · v${d.version} · updated ${ago(d.updated_at)}</span><div class="row"><button class="btn sm" data-share="${d.id}">${icon('share')}Share</button><label class="btn sm ghost">${icon('upload')}New version<input type="file" accept="application/pdf" hidden data-replace="${d.id}"></label><button class="btn sm ghost" data-ren="${d.id}">Rename</button><button class="btn sm danger" data-deld="${d.id}">Delete</button></div></div></div>`).join('')}
+        <div class="drop" id="drop"><input type="file" accept="application/pdf" hidden id="file"><div>${icon('upload')}<b>Upload a PDF.</b><p class="muted">Drop it here or click to browse</p><label class="tg sharetg" onclick="event.stopPropagation()"><input type="checkbox" id="shareTeam" ${isOwner() ? '' : 'checked'}><span class="sw"></span><div><b>Share with the team</b><span>Sales can send it to clients</span></div></label></div></div>
+        ${DOCS.map((d) => { const can = isOwner() || d.mine; return `<div class="doc" data-vis="${d.visibility}" data-mine="${d.mine ? 1 : 0}"><img src="${thumb(d.id, 1)}" data-pv="${d.id}" data-p="1"><div class="b"><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${d.visibility === 'team' ? '<span class="chip ok">Team</span>' : '<span class="chip off">' + icon('lock') + 'Private</span>'}${!d.mine && d.owner_name ? `<span class="muted" style="font-size:12px">by ${esc(d.owner_name)}</span>` : ''}</div><h3>${esc(d.name)}</h3><span class="muted">${d.pages} pages · v${d.version} · updated ${ago(d.updated_at)}</span><div class="row"><button class="btn sm" data-share="${d.id}">${icon('share')}Share</button>${can ? `<button class="btn sm ghost" data-vis="${d.id}">${d.visibility === 'team' ? 'Make private' : 'Share with team'}</button><label class="btn sm ghost">${icon('upload')}New version<input type="file" accept="application/pdf" hidden data-replace="${d.id}"></label><button class="btn sm ghost" data-ren="${d.id}">Rename</button><button class="btn sm danger" data-deld="${d.id}">Delete</button>` : ''}</div></div></div>`; }).join('')}
       </div>`;
     const up = async (file, replaceId) => {
       if (!/pdf$/i.test(file.type || file.name)) { toast('Upload a PDF'); return; }
-      try { await uploadPdf(file, replaceId); toast(replaceId ? 'New version live on all links' : 'Deck uploaded'); await loadDocs(); route(); } catch (e) { console.error(e); toast(e.message || 'Upload failed'); }
+      try { await uploadPdf(file, replaceId, $('#shareTeam') && $('#shareTeam').checked ? 'team' : 'private'); toast(replaceId ? 'New version live on all links' : 'File uploaded'); await loadDocs(); route(); } catch (e) { console.error(e); toast(e.message || 'Upload failed'); }
     };
+    $('#drop').onclick = (e) => { if (!e.target.closest('.sharetg')) $('#file').click(); };
     $('#file').onchange = (e) => e.target.files[0] && up(e.target.files[0]);
+    $$('#docFilter button').forEach((b) => (b.onclick = () => { $$('#docFilter button').forEach((x) => x.classList.toggle('on', x === b)); $$('.doc').forEach((el) => { const f = b.dataset.f; el.hidden = f === 'team' ? el.dataset.vis !== 'team' : f === 'mine' ? el.dataset.mine !== '1' : false; }); }));
+    $$('[data-vis]').forEach((b) => { if (b.tagName !== 'BUTTON') return; b.onclick = async () => { const d = DOCS.find((x) => x.id === b.dataset.vis); await api('/docs/' + d.id, { method: 'PATCH', body: JSON.stringify({ visibility: d.visibility === 'team' ? 'private' : 'team' }) }); toast(d.visibility === 'team' ? 'Now private' : 'Shared with the team'); await loadDocs(); route(); }; });
     const dz = $('#drop');
     ['dragover', 'dragenter'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('over'); }));
     ['dragleave', 'drop'].forEach((ev) => dz.addEventListener(ev, () => dz.classList.remove('over')));
     dz.addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) up(f); });
     $$('[data-replace]').forEach((i) => (i.onchange = (e) => e.target.files[0] && up(e.target.files[0], i.dataset.replace)));
-    $$('[data-share]').forEach((b) => (b.onclick = () => linkForm({ require_email: 1, watermark: 1, notify: 1, active: 1, doc_ids: [b.dataset.share], cta_label: 'Book a Call' }) ));
-    $$('[data-ren]').forEach((b) => (b.onclick = async () => { const d = DOCS.find((x) => x.id === b.dataset.ren); const n = prompt('Deck name', d.name); if (!n) return; await api('/docs/' + d.id, { method: 'PATCH', body: JSON.stringify({ name: n }) }); route(); }));
-    $$('[data-deld]').forEach((b) => (b.onclick = async () => { if (!confirm('Delete this deck? Links pointing to it will show nothing.')) return; await api('/docs/' + b.dataset.deld, { method: 'DELETE' }); route(); }));
+    $$('[data-share]').forEach((b) => (b.onclick = () => linkForm({ require_email: 1, watermark: 1, notify: 1, active: 1, doc_ids: [b.dataset.share], cta_label: 'Book a Call', cta_url: ME.user.cta_url || '' }) ));
+    $$('[data-ren]').forEach((b) => (b.onclick = async () => { const d = DOCS.find((x) => x.id === b.dataset.ren); const n = prompt('File name', d.name); if (!n) return; await api('/docs/' + d.id, { method: 'PATCH', body: JSON.stringify({ name: n }) }); route(); }));
+    $$('[data-deld]').forEach((b) => (b.onclick = async () => { if (!confirm('Delete this file? Links pointing to it will show nothing.')) return; await api('/docs/' + b.dataset.deld, { method: 'DELETE' }); route(); }));
   }
 
   function preview(docId, p) {
@@ -393,20 +401,65 @@
   async function messages() {
     const ms = await api('/messages');
     $('#main').innerHTML = `<div class="ph"><div><p class="eyebrow">Inbox</p><h1>Questions.</h1><p>Asked from inside the deck, tagged with the slide.</p></div></div>
-      <div class="card">${ms.length ? ms.map((m) => `<div class="msg">${m.doc_id ? `<img src="${thumb(m.doc_id, m.page || 1)}" data-pv="${m.doc_id}" data-p="${m.page || 1}" style="cursor:zoom-in">` : ''}<div style="flex:1;min-width:0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><a href="#/visitor/${m.visitor_id}"><b>${esc(m.name || m.email || 'Anonymous')}</b></a><span class="chip warm">Slide ${m.page || '?'}</span><span class="muted" style="font-size:12px">${esc(m.doc_name || '')} · ${ago(m.created_at)}</span></div><div class="body">${esc(m.body)}</div>${m.email ? `<a class="btn sm ghost" href="mailto:${esc(m.email)}?subject=${encodeURIComponent('Re: your question on slide ' + (m.page || ''))}&body=${encodeURIComponent('Hello ' + ((m.name || '').split(' ')[0] || '') + ',\n\n> ' + m.body + '\n\n')}">Reply</a>` : ''}</div></div>`).join('') : '<div class="empty"><b>No questions yet</b>Viewers can ask from any slide.</div>'}</div>`;
+      <div class="card">${ms.length ? ms.map((m) => `<div class="msg">${m.doc_id ? `<img src="${thumb(m.doc_id, m.page || 1)}" data-pv="${m.doc_id}" data-p="${m.page || 1}" style="cursor:zoom-in">` : ''}<div style="flex:1;min-width:0"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><a href="#/visitor/${m.visitor_id}"><b>${esc(m.name || m.email || 'Anonymous')}</b></a><span class="chip warm">Slide ${m.page || '?'}</span>${isOwner() && m.owner_name ? `<span class="chip off">${esc(m.owner_name.split(' ')[0])}'s link</span>` : ''}<span class="muted" style="font-size:12px">${esc(m.doc_name || '')} · ${ago(m.created_at)}</span></div><div class="body">${esc(m.body)}</div>${m.email ? `<a class="btn sm ghost" href="mailto:${esc(m.email)}?subject=${encodeURIComponent('Re: your question on slide ' + (m.page || ''))}&body=${encodeURIComponent('Hello ' + ((m.name || '').split(' ')[0] || '') + ',\n\n> ' + m.body + '\n\n')}">Reply</a>` : ''}</div></div>`).join('') : '<div class="empty"><b>No questions yet</b>Viewers can ask from any slide.</div>'}</div>`;
     $('#msgCount').textContent = '';
   }
 
   // ---------- settings ----------
   async function settings() {
     const st = (ok, t, d) => `<div class="status"><span class="chip ${ok ? 'ok' : 'off'}">${ok ? 'On' : 'Off'}</span><div><b>${t}</b><div class="muted" style="font-size:13px">${d}</div></div></div>`;
-    $('#main').innerHTML = `<div class="ph"><div><p class="eyebrow">System</p><h1>Settings.</h1><p>Configured with environment variables on your server.</p></div></div>
-      <div class="card"><h2>Status.</h2>
-        ${st(ME.email, 'Email (Resend)', ME.email ? `Sending codes and alerts${ME.notifyTo ? ' to ' + esc(ME.notifyTo) : ''}.` : 'Add <code>RESEND_API_KEY</code>, <code>FROM_EMAIL</code> and <code>NOTIFY_EMAIL</code> to the Edge Function secrets. Needed for email codes and alerts.')}
-        ${st(ME.slack, 'Slack alerts', ME.slack ? 'Posting to your webhook.' : 'Add <code>SLACK_WEBHOOK_URL</code> to the Edge Function secrets for pings in a channel.')}
-        ${st(true, 'Public URL', `Links are built on <code>${esc(ME.siteUrl)}</code>. Change with the <code>SITE_URL</code> secret.`)}
-      </div>
-      <div class="card"><h2>How tracking works.</h2><p class="muted" style="line-height:1.6">Time counts only while the deck tab is visible and the viewer has interacted in the last two minutes. Completion counts slides viewed for 1.5s or more. Engagement score mixes completion (45), time spent up to 6 minutes (35), return visits (15), a question (5) and a call to action click (5). Forwarding is flagged when a per investor link is opened with a different email. Location comes from the viewer IP.</p></div>`;
+    const u = ME.user;
+    $('#main').innerHTML = `<div class="ph"><div><p class="eyebrow">Account</p><h1>Settings.</h1><p>Your profile shows on the links you send.</p></div></div>
+      <div class="grid2">
+        <div class="stack">
+          <div class="card"><h2>Profile.</h2><form class="form" id="pf">
+            <div class="two"><label class="fld">Name <small>Shown on your links: "Shared by …"</small><input name="name" value="${esc(u.name || '')}"></label><label class="fld">Title<input name="title" value="${esc(u.title || '')}" placeholder="Account Executive"></label></div>
+            <label class="fld">Booking link <small>Default "Book a Call" button on your new links</small><input name="cta_url" value="${esc(u.cta_url || '')}" placeholder="https://calendly.com/you"></label>
+            <label class="fld">Email <small>Alerts for your links go here</small><input value="${esc(u.email || '')}" disabled></label>
+            <div><button class="btn sm">Save Profile<span class="arr">↗</span></button></div></form></div>
+          <div class="card"><h2>Password.</h2><form class="form" id="pw">
+            <div class="two"><label class="fld">Current password<input type="password" name="current_password" autocomplete="current-password"></label><label class="fld">New password <small>10+ characters</small><input type="password" name="new_password" autocomplete="new-password"></label></div>
+            <p class="err" id="pwErr"></p><div><button class="btn sm ghost">Change Password</button></div></form></div>
+        </div>
+        <div class="stack">
+          <div class="card"><h2>Status.</h2>
+            ${st(ME.email, 'Email alerts and codes', ME.email ? `Alerts for your links go to ${esc(u.email)}.` : 'Not set up yet. Email codes and alerts switch on once Resend is connected.')}
+            ${st(ME.slack, 'Slack alerts', ME.slack ? 'Posting to the team channel.' : 'Add <code>SLACK_WEBHOOK_URL</code> to the backend secrets for pings in a channel.')}
+            ${st(true, 'Public URL', `Links are built on <code>${esc(ME.siteUrl)}</code>.`)}
+          </div>
+          <div class="card"><h2>How tracking works.</h2><p class="muted" style="line-height:1.6">Time counts only while the file is open and the viewer has interacted in the last two minutes. Completion counts pages viewed for 1.5s or more. The engagement score mixes completion, time spent, return visits, questions and call clicks. A personal link opened with a different email is flagged as forwarded.</p></div>
+        </div>
+      </div>`;
+    $('#pf').onsubmit = async (e) => { e.preventDefault(); const f = e.target; const r = await api('/me', { method: 'PATCH', body: JSON.stringify({ name: f.name.value, title: f.title.value, cta_url: f.cta_url.value }) }); ME.user = r.user; $('#meName').textContent = r.user.name || r.user.email; toast('Profile saved'); };
+    $('#pw').onsubmit = async (e) => { e.preventDefault(); const f = e.target; $('#pwErr').textContent = ''; try { const r = await api('/me', { method: 'PATCH', body: JSON.stringify({ current_password: f.current_password.value, new_password: f.new_password.value }) }); if (r.token) tok.set(r.token); f.reset(); toast('Password changed'); } catch (err) { $('#pwErr').textContent = err.message; } };
+  }
+
+  // ---------- team (owner only) ----------
+  async function team() {
+    if (!isOwner()) { location.hash = '#/'; return; }
+    const us = await api('/team');
+    $('#main').innerHTML = `<div class="ph"><div><p class="eyebrow">Team</p><h1>Who can share.</h1><p>Sales sees their own links and contacts, plus files you share with the team. You see everything.</p></div><div class="acts"><button class="btn" id="inv">Add Person<span class="arr">↗</span></button></div></div>
+      <div class="card"><div class="tw"><table><thead><tr><th>Person</th><th>Role</th><th>Links</th><th>Viewers</th><th>Last sign in</th><th></th></tr></thead><tbody>
+      ${us.map((x) => `<tr><td><div class="who">${av(x.email)}<div><b>${esc(x.name || x.email)}</b><span>${esc([x.title, x.email].filter(Boolean).join(' · '))}</span></div></div></td>
+        <td>${x.role === 'owner' ? '<span class="chip warm">Owner</span>' : x.active ? '<span class="chip ok">Member</span>' : '<span class="chip off">Paused</span>'}</td>
+        <td class="num">${x.stats.links}</td><td class="num">${x.stats.viewers}</td><td class="muted">${ago(x.last_login)}</td>
+        <td style="white-space:nowrap">${x.role === 'owner' ? '' : `<button class="btn sm ghost" data-reset="${x.id}">Reset password</button> <button class="btn sm ${x.active ? 'danger' : 'ghost'}" data-act="${x.id}" data-on="${x.active ? 0 : 1}">${x.active ? 'Pause access' : 'Restore access'}</button>`}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+    const showPw = (title, x, r) => {
+      openDrawer(`<div class="form"><p class="eyebrow">Access</p><h2>${esc(title)}</h2><div class="created"><div>Send this to ${esc(x.name || x.email)}${r.emailed ? '. We also emailed it to them.' : '.'}</div><div class="u" id="cred">Sign in: ${esc(r.signIn || ME.siteUrl + '/admin/')}\nEmail: ${esc(x.email)}\nTemporary password: ${esc(r.tempPassword)}</div><div><button class="btn gold" id="cp">Copy Details<span class="arr">↗</span></button></div></div><p class="muted">The password shows only once. They can change it in Settings.</p><div class="formacts"><button class="btn" id="dn">Done</button></div></div>`);
+      $('#cp').onclick = () => { navigator.clipboard.writeText($('#cred').innerText); toast('Copied'); };
+      $('#dn').onclick = () => { closeDrawer(); route(); };
+    };
+    $('#inv').onclick = () => {
+      openDrawer(`<form class="form" id="tf"><div><p class="eyebrow">Team</p><h2>Add a person.</h2></div><div class="fs"><div class="two"><label class="fld">Name<input name="name" required placeholder="Kolapo Ayantoye"></label><label class="fld">Title<input name="title" placeholder="Account Executive"></label></div><label class="fld">Work email<input name="email" type="email" required placeholder="name@oysterskin.com"></label></div><p class="err" id="tfErr"></p><div class="formacts"><button type="button" class="btn ghost" id="cx">Cancel</button><button class="btn">Add Person<span class="arr">↗</span></button></div></form>`);
+      $('#cx').onclick = closeDrawer;
+      $('#tf').onsubmit = async (e) => { e.preventDefault(); const f = e.target; try { const r = await api('/team', { method: 'POST', body: JSON.stringify({ name: f.name.value, title: f.title.value, email: f.email.value }) }); showPw(`${r.user.name || 'They'} can sign in now.`, r.user, r); } catch (err) { $('#tfErr').textContent = err.message; } };
+    };
+    $('#main').onclick = async (e) => {
+      const rs = e.target.closest('[data-reset]'); const ac = e.target.closest('[data-act]');
+      if (rs) { if (!confirm('Create a new temporary password? The old one stops working.')) return; const x = us.find((y) => y.id === rs.dataset.reset); const r = await api('/team/' + x.id, { method: 'PATCH', body: JSON.stringify({ reset: true }) }); showPw('New password ready.', x, { ...r, signIn: ME.siteUrl + '/admin/' }); }
+      if (ac) { await api('/team/' + ac.dataset.act, { method: 'PATCH', body: JSON.stringify({ active: ac.dataset.on === '1' }) }); toast(ac.dataset.on === '1' ? 'Access restored' : 'Access paused'); route(); }
+    };
   }
 
   start();
