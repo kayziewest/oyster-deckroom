@@ -22,7 +22,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 a{color:inherit}
 [hidden]{display:none!important}
 :focus-visible{outline:2px solid var(--orange-deep);outline-offset:3px}
-.wm{height:20px;width:auto;display:block}
+.wm{height:20px;width:auto;max-width:none;display:block;align-self:flex-start;object-fit:contain}
 .muted{color:var(--muted)}
 .err{color:var(--err);min-height:18px;font-size:13px}
 i[data-i]{display:inline-flex;width:18px;height:18px;flex:none}
@@ -44,7 +44,7 @@ i[data-i] svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:
 @keyframes drift{to{transform:translateX(40vw)}}
 .login-card{position:relative;width:100%;max-width:400px;background:var(--mega);border:1px solid var(--line-soft);padding:34px;border-radius:22px;display:flex;flex-direction:column;gap:12px;box-shadow:var(--sh-lift);animation:up 1.05s var(--e-out) both}
 @keyframes up{from{opacity:0;transform:translateY(34px)}to{opacity:1;transform:none}}
-.login-card .wm{height:22px;margin-bottom:18px}
+.login-card .wm{height:24px;width:auto;margin-bottom:18px}
 .login-card h1{font:700 36px/1 var(--disp);letter-spacing:-.04em}
 .login-card input{border:1px solid var(--line-soft);border-radius:12px;padding:13px 16px;background:var(--card-2bg);font-size:15px;margin-top:8px}
 .login-card input:focus{outline:none;border-color:var(--orange-deep);box-shadow:0 0 0 3px rgba(168,67,26,.14)}
@@ -250,3 +250,14 @@ code{background:var(--band-sand);padding:1px 6px;border-radius:5px;font-size:12p
   .drawer-panel{right:6px;left:6px;top:6px;bottom:6px;width:auto;padding:20px}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+.me{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:12px;text-decoration:none;margin-bottom:4px}
+.me:hover{background:var(--wash)}
+.me .av{width:30px;height:30px;font-size:12px}
+.me b{display:block;font:700 13px var(--disp)}
+.me small{display:block;font-size:11.5px;color:var(--muted)}
+.seg{display:inline-flex;background:var(--card-bg);border:1px solid var(--line-soft);border-radius:12px;padding:3px}
+.seg button{border:0;background:none;padding:7px 14px;border-radius:9px;font:600 13px var(--disp);color:var(--muted);cursor:pointer}
+.seg button.on{background:var(--mega);color:var(--ink);box-shadow:var(--sh-sm)}
+.sharetg{margin-top:14px;text-align:left;justify-content:center}
+.login-card input+input{margin-top:0}

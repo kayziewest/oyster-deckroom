@@ -2,6 +2,7 @@
 // Deploy with "Verify JWT" OFF. Secrets: ADMIN_PASSWORD, SESSION_SECRET, SITE_URL,
 // optional RESEND_API_KEY, FROM_EMAIL, NOTIFY_EMAIL, SLACK_WEBHOOK_URL, BRAND_NAME, SENDER_NAME.
 import postgres from 'npm:postgres@3.4.5';
+import { makeAdmin } from './admin.ts';
 
 const env = (k: string, d = '') => Deno.env.get(k) ?? d;
 const ADMIN_PASSWORD = env('ADMIN_PASSWORD');
@@ -68,10 +69,25 @@ alter table otps enable row level security;
 alter table investors enable row level security;
 
 `;
+const MIGRATIONS = `
+create table if not exists users (id text primary key, email text unique, name text, role text default 'member', pw_salt text, pw_hash text, pw_ver int default 1,
+  title text, cta_url text, active int default 1, created_at bigint, last_login bigint);
+alter table users enable row level security;
+alter table links add column if not exists owner_id text;
+alter table documents add column if not exists owner_id text;
+alter table documents add column if not exists visibility text default 'private';
+alter table investors add column if not exists owner_id text;
+update links set owner_id='owner' where owner_id is null;
+update documents set owner_id='owner' where owner_id is null;
+update investors set owner_id='owner' where owner_id is null;
+create index if not exists ix_links_owner on links(owner_id);
+`;
 let ready: Promise<void> | null = null;
 const bootstrap = () => (ready ??= (async () => {
   const has = await one(`SELECT to_regclass('public.links') t`);
   if (!has?.t) await sql.unsafe(SCHEMA);
+  await sql.unsafe(MIGRATIONS);
+  await q(`INSERT INTO users (id,email,name,role,active,created_at) VALUES ('owner',?,?,'owner',1,?) ON CONFLICT (id) DO NOTHING`, (env('NOTIFY_EMAIL') || '').toLowerCase(), SENDER, Date.now());
   if (!LOCAL) { const r = await sfetch(`/bucket/${BUCKET}`); await r.body?.cancel(); if (r.status !== 200) await sfetch('/bucket', { id: BUCKET, name: BUCKET, public: false }); }
 })().catch((e) => { ready = null; throw e; }));
 
@@ -160,22 +176,28 @@ async function sendTo(to: string, subject: string, text: string, replyTo?: strin
   });
   if (!r.ok) console.error('[mail]', r.status, await r.text());
 }
-function notify(subject: string, text: string, url?: string, replyTo?: string) {
+const ownerCache = new Map<string, { t: number; u: any }>();
+async function ownerOf(l: any) {
+  const id = l?.owner_id || 'owner'; const hit = ownerCache.get(id);
+  if (hit && hit.t > Date.now() - 60000) return hit.u;
+  const u = await one('SELECT id,email,name FROM users WHERE id=?', id) || { id, email: env('NOTIFY_EMAIL'), name: SENDER };
+  ownerCache.set(id, { t: Date.now(), u }); return u;
+}
+// alerts go to whoever owns the link; Slack (optional) gets everything, tagged with the owner
+function notify(l: any, subject: string, text: string, url?: string, replyTo?: string) {
   console.log('[notify]', subject);
   const body = `${text}${url ? `\n\nOpen in DeckRoom: ${url}` : ''}`;
-  if (env('NOTIFY_EMAIL')) bg(sendTo(env('NOTIFY_EMAIL'), subject, body, replyTo));
-  if (slackOn()) bg(fetch(env('SLACK_WEBHOOK_URL'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `*${subject}*\n${text}${url ? `\n<${url}|Open in DeckRoom>` : ''}` }) }));
+  bg((async () => {
+    const o = await ownerOf(l);
+    const to = o?.email || env('NOTIFY_EMAIL');
+    if (to) await sendTo(to, subject, body, replyTo);
+    if (slackOn()) await fetch(env('SLACK_WEBHOOK_URL'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `*${subject}*${o?.name ? ` (${o.name}'s link)` : ''}\n${text}${url ? `\n<${url}|Open in DeckRoom>` : ''}` }) });
+  })());
 }
 const adminUrl = (h: string) => `${SITE}/admin/#/${h}`;
 
 // ---------- admin auth ----------
-async function adminToken() { const exp = now() + 30 * 864e5; return `a.${exp}.${await sign('admin:' + exp + ':' + (await hash(ADMIN_PASSWORD)).slice(0, 12))}`; }
-async function isAdmin(req: Request) {
-  const t = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  const [p, exp, sig] = t.split('.');
-  if (p !== 'a' || !exp || Number(exp) < now()) return false;
-  return sig === await sign('admin:' + exp + ':' + (await hash(ADMIN_PASSWORD)).slice(0, 12));
-}
+
 
 // ---------- viewer auth ----------
 async function viewerToken(l: any, vid: string) { const pw = (l.password_hash || '').slice(0, 10); return `v.${l.id}.${vid}.${await sign(`v:${l.id}:${vid}:${pw}`)}`; }
@@ -194,7 +216,7 @@ function score(v: any) {
 }
 async function visitorRows(where = '', ...args: unknown[]) {
   const rows = await q(`
-    SELECT v.id, v.email, v.name, v.link_id, v.first_seen, v.last_seen, v.forwarded, l.name link_name, l.slug,
+    SELECT v.id, v.email, v.name, v.link_id, v.first_seen, v.last_seen, v.forwarded, l.name link_name, l.slug, l.owner_id, (SELECT name FROM users WHERE id=l.owner_id) owner_name,
       (SELECT COUNT(*) FROM sessions s WHERE s.visitor_id=v.id) visits,
       (SELECT COALESCE(SUM(duration),0) FROM sessions s WHERE s.visitor_id=v.id) ms,
       (SELECT country FROM sessions s WHERE s.visitor_id=v.id ORDER BY started_at DESC LIMIT 1) country,
@@ -238,8 +260,8 @@ async function pageStats(docId: string, where = '', ...args: unknown[]) {
 async function upsertInvestor(email: string, f: any = {}) {
   email = (email || '').toLowerCase(); if (!email) return;
   const ex = await one('SELECT * FROM investors WHERE email=?', email);
-  if (!ex) { await q('INSERT INTO investors (email,name,firm,stage,notes,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT (email) DO NOTHING', email, f.name || '', f.firm || '', f.stage || 'Viewed', '', now()); return; }
-  const order = ['Shared', 'Viewed', 'Engaged', 'Meeting', 'Due diligence', 'Committed', 'Passed'];
+  if (!ex) { await q('INSERT INTO investors (email,name,firm,stage,notes,updated_at,owner_id) VALUES (?,?,?,?,?,?,?) ON CONFLICT (email) DO NOTHING', email, f.name || '', f.firm || '', f.stage || 'Viewed', '', now(), f.owner_id || null); return; }
+  const order = ['Shared', 'Viewed', 'Engaged', 'Meeting', 'Due diligence', 'Committed', 'Passed', 'Proposal', 'Won', 'Lost'];
   const stage = f.stage && order.indexOf(f.stage) > order.indexOf(ex.stage) && ex.stage !== 'Passed' ? f.stage : ex.stage;
   await q(`UPDATE investors SET name=COALESCE(NULLIF(name,''),?), firm=COALESCE(NULLIF(firm,''),?), stage=?, updated_at=? WHERE email=?`, f.name || '', f.firm || '', stage, now(), email);
 }
@@ -310,11 +332,11 @@ async function grantVisitor(c: Ctx, l: any, email: string, name: string) {
     v = await one('SELECT * FROM visitors WHERE id=?', vid);
     if (forwarded) {
       await logEvent(l.id, vid, 'forwarded', { from: l.investor_email, to: email, sameDevice: prior?.email || null });
-      if (l.notify) notify(`Deck forwarded: ${email} opened ${l.investor_name || l.investor_email}'s link`, `${email} opened the link you sent to ${l.investor_email} (${l.name || l.slug}). It was likely forwarded inside the firm.`, adminUrl('visitor/' + vid));
+      if (l.notify) notify(l, `Deck forwarded: ${email} opened ${l.investor_name || l.investor_email}'s link`, `${email} opened the link you sent to ${l.investor_email} (${l.name || l.slug}). It was likely forwarded inside the firm.`, adminUrl('visitor/' + vid));
     }
   } else if (name && !v.name) await q('UPDATE visitors SET name=? WHERE id=?', name, v.id);
   const sameFirm = email && l.investor_email && email.split('@')[1] === l.investor_email.split('@')[1];
-  if (email) await upsertInvestor(email, { name, firm: sameFirm ? l.firm : '', stage: 'Viewed' });
+  if (email) await upsertInvestor(email, { name, firm: sameFirm ? l.firm : '', stage: 'Viewed', owner_id: l.owner_id });
   return { v, token: await viewerToken(l, v.id) };
 }
 async function viewerGuard(c: Ctx, slug: string) {
@@ -334,7 +356,8 @@ async function viewer(c: Ctx, slug: string, action: string, sub: string[]): Prom
     const v = await currentVisitor(c.req, l);
     const first = parseDocs(l)[0];
     const d = first ? await one('SELECT name FROM documents WHERE id=?', first) : null;
-    return { state: 'ok', brand: BRAND, sender: SENDER, title: d?.name || 'Deck', message: l.message || '', investorName: l.investor_name || '', prefillEmail: l.investor_email || '',
+    const owner = await ownerOf(l);
+    return { state: 'ok', brand: BRAND, sender: (owner?.name || SENDER).split(' ')[0], title: d?.name || 'Deck', message: l.message || '', investorName: l.investor_name || '', prefillEmail: l.investor_email || '',
       gate: { email: !!l.require_email, verify: !!l.verify_email, password: !!l.password_hash }, granted: !!v };
   }
   if (action === 'access') {
@@ -351,7 +374,7 @@ async function viewer(c: Ctx, slug: string, action: string, sub: string[]): Prom
       if (!emailOn() && env('DEV') !== '1') fail(503, 'Email codes are not set up yet. Ask the sender for a new link.');
       const code = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
       await q('INSERT INTO otps (link_id,email,code,expires_at,name,tries) VALUES (?,?,?,?,?,0) ON CONFLICT (link_id,email) DO UPDATE SET code=excluded.code, expires_at=excluded.expires_at, name=excluded.name, tries=0', l.id, email, code, now() + 15 * 60000, name);
-      await sendTo(email, `Your ${BRAND} access code: ${code}`, `Your code to view the deck ${SENDER} at ${BRAND} shared with you:\n\n${code}\n\nIt expires in 15 minutes.`);
+      await sendTo(email, `Your ${BRAND} access code: ${code}`, `Your code to view the file ${(await ownerOf(l))?.name || SENDER} at ${BRAND} shared with you:\n\n${code}\n\nIt expires in 15 minutes.`);
       return { verify: true, devCode: env('DEV') === '1' ? code : undefined };
     }
     const { token } = await grantVisitor(c, l, email, name);
@@ -393,7 +416,7 @@ async function viewer(c: Ctx, slug: string, action: string, sub: string[]): Prom
     if (!g.l.allow_download || !g.docIds.includes(sub[0])) fail(403, 'Downloads are off for this link.');
     const d = await one('SELECT * FROM documents WHERE id=?', sub[0]);
     await logEvent(g.l.id, g.v.id, 'download', { doc: d.name });
-    if (g.l.notify) notify(`${g.v.email || 'A visitor'} downloaded ${d.name}`, `${g.v.email || 'An anonymous visitor'} downloaded "${d.name}" via ${g.l.name || g.l.slug}.`, adminUrl('visitor/' + g.v.id));
+    if (g.l.notify) notify(g.l, `${g.v.email || 'A visitor'} downloaded ${d.name}`, `${g.v.email || 'An anonymous visitor'} downloaded "${d.name}" via ${g.l.name || g.l.slug}.`, adminUrl('visitor/' + g.v.id));
     const [url] = await store.urls([`${docPrefix(d)}/original.pdf`], 120, `${d.name}.pdf`);
     return { url };
   }
@@ -407,7 +430,7 @@ async function viewer(c: Ctx, slug: string, action: string, sub: string[]): Prom
     await logEvent(g.l.id, g.v.id, prev ? 'return' : 'open', { country, city });
     if (g.l.notify) {
       const who = g.v.email || 'Someone (no email)'; const where = [city, country].filter(Boolean).join(', ');
-      notify(prev ? `${who} is back on your deck (visit ${prev + 1})` : `${who} just opened your deck`,
+      notify(g.l, prev ? `${who} is back on your deck (visit ${prev + 1})` : `${who} just opened your deck`,
         `${who}${g.v.name ? ' (' + g.v.name + ')' : ''} ${prev ? 'returned to' : 'opened'} "${g.l.name || g.l.slug}"${where ? ' from ' + where : ''}.`, adminUrl('visitor/' + g.v.id));
     }
     return { sessionId: sid };
@@ -434,152 +457,20 @@ async function viewer(c: Ctx, slug: string, action: string, sub: string[]): Prom
     await q('INSERT INTO messages (link_id,visitor_id,doc_id,page,body,created_at) VALUES (?,?,?,?,?,?)', g.l.id, g.v.id, doc, parseInt(b.page) || null, body, now());
     await logEvent(g.l.id, g.v.id, 'message', { page: b.page });
     if (g.v.email) await upsertInvestor(g.v.email, { stage: 'Engaged' });
-    notify(`Question from ${g.v.email || 'a viewer'} on slide ${b.page}`, `${body}\n\n${g.v.email ? 'Reply to: ' + g.v.email : ''}`, adminUrl('messages'), g.v.email);
+    notify(g.l, `Question from ${g.v.email || 'a viewer'} on slide ${b.page}`, `${body}\n\n${g.v.email ? 'Reply to: ' + g.v.email : ''}`, adminUrl('messages'), g.v.email);
     return { ok: true };
   }
   if (action === 'cta') {
     await logEvent(g.l.id, g.v.id, 'cta', {});
     if (g.v.email) await upsertInvestor(g.v.email, { stage: 'Engaged' });
-    notify(`${g.v.email || 'A viewer'} clicked "${g.l.cta_label || 'Book a Call'}"`, `${g.v.email || 'A viewer'} clicked your call to action on ${g.l.name || g.l.slug}.`, adminUrl('visitor/' + g.v.id));
+    notify(g.l, `${g.v.email || 'A viewer'} clicked "${g.l.cta_label || 'Book a Call'}"`, `${g.v.email || 'A viewer'} clicked your call to action on ${g.l.name || g.l.slug}.`, adminUrl('visitor/' + g.v.id));
     return { ok: true };
   }
   fail(404, 'not found');
 }
 
-async function admin(c: Ctx, parts: string[], method: string): Promise<any> {
-  const [res, id, sub] = parts; const b = c.body;
-  if (res === 'login' && method === 'POST') {
-    if (!ADMIN_PASSWORD) fail(500, 'ADMIN_PASSWORD secret is not set');
-    if (clean(b.password, 200) !== ADMIN_PASSWORD) fail(401, 'Wrong password');
-    return { token: await adminToken() };
-  }
-  if (!(await isAdmin(c.req))) fail(401, 'auth');
-  if (res === 'me') return { ok: true, siteUrl: SITE, brand: BRAND, sender: SENDER, email: emailOn(), slack: slackOn(), notifyTo: env('NOTIFY_EMAIL') };
-
-  if (res === 'docs') {
-    if (!id && method === 'GET') {
-      const docs = await q('SELECT * FROM documents WHERE version>0 ORDER BY created_at DESC');
-      await Promise.all(docs.map(async (d: any) => { d.thumbs = await docAssets(d, 12 * 3600, 'thumb'); }));
-      return docs;
-    }
-    if (!id && method === 'POST') { // reserve a version and hand out upload URLs
-      const pages = Math.max(1, Math.min(parseInt(b.pages) || 0, 300)); if (!parseInt(b.pages)) fail(400, 'No pages');
-      let d = b.replaceId ? await one('SELECT * FROM documents WHERE id=?', b.replaceId) : null;
-      const docId = d ? d.id : rid(8);
-      const version = d ? Math.max(d.version, d.pending_version || 0) + 1 : 1;
-      if (d) await q('UPDATE documents SET pending_version=? WHERE id=?', version, docId);
-      else await q('INSERT INTO documents (id,name,version,pending_version,pages,ratio,created_at,updated_at) VALUES (?,?,0,?,?,?,?,?)', docId, clean(b.name, 120) || 'Deck', version, pages, Number(b.ratio) || 0.5625, now(), now());
-      const pre = `${docId}/v${version}`;
-      const uploads: Record<string, string> = {};
-      for (let i = 1; i <= pages; i++) { uploads[`page-${i}.jpg`] = await store.uploadUrl(`${pre}/page-${i}.jpg`); uploads[`thumb-${i}.jpg`] = await store.uploadUrl(`${pre}/thumb-${i}.jpg`); }
-      uploads['original.pdf'] = await store.uploadUrl(`${pre}/original.pdf`);
-      return { id: docId, version, uploads };
-    }
-    if (id && sub === 'commit' && method === 'POST') {
-      const d = await one('SELECT * FROM documents WHERE id=?', id); if (!d) fail(404, 'no doc');
-      const version = parseInt(b.version); if (version !== d.pending_version) fail(409, 'Stale upload');
-      const old = d.version;
-      await q('UPDATE documents SET version=?, pending_version=NULL, pages=?, ratio=?, name=COALESCE(NULLIF(?,\'\'),name), updated_at=? WHERE id=?', version, parseInt(b.pages), Number(b.ratio) || d.ratio, clean(b.name, 120), now(), id);
-      if (old) bg(store.removePrefix(`${id}/v${old}`));
-      return { ok: true };
-    }
-    if (id && sub === 'pages') { const d = await one('SELECT * FROM documents WHERE id=?', id); if (!d) fail(404, 'no doc'); return { urls: await docAssets(d, 12 * 3600, 'page') }; }
-    if (id && method === 'PATCH') { await q('UPDATE documents SET name=? WHERE id=?', clean(b.name, 120), id); return { ok: true }; }
-    if (id && method === 'DELETE') { await q('DELETE FROM documents WHERE id=?', id); bg(store.removePrefix(id)); return { ok: true }; }
-  }
-
-  if (res === 'links') {
-    if (!id && method === 'GET') {
-      const links = await q('SELECT * FROM links ORDER BY created_at DESC');
-      const stats = await q('SELECT link_id, COUNT(*) views, COUNT(DISTINCT visitor_id) visitors, COALESCE(SUM(duration),0) ms, MAX(last_ping) last FROM sessions GROUP BY link_id');
-      const m = Object.fromEntries(stats.map((s) => [s.link_id, s]));
-      return links.map((l) => ({ ...l, doc_ids: parseDocs(l), has_password: !!l.password_hash, password_hash: undefined, stats: m[l.id] || { views: 0, visitors: 0, ms: 0 } }));
-    }
-    if (!id && method === 'POST') {
-      const o = linkPayload(b);
-      const want = slugify(b.slug);
-      let slug = want && !(await one('SELECT 1 x FROM links WHERE slug=?', want)) ? want : '';
-      if (want && !slug) fail(400, 'That URL is taken');
-      if (!slug) { const base = slugify(o.firm || o.investor_name || ''); slug = base ? `${base}-${rid(4).toLowerCase()}` : rid(10); }
-      if (['admin', 'assets', 'index', '404'].includes(slug)) fail(400, 'That URL is reserved');
-      const row: any = { require_email: 1, verify_email: 0, allow_download: 0, watermark: 1, notify: 1, active: 1, doc_ids: '[]', ...o, id: rid(10), slug, created_at: now() };
-      if (b.password) row.password_hash = await hash(String(b.password));
-      const keys = Object.keys(row);
-      await q(`INSERT INTO links (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`, ...keys.map((k) => row[k]));
-      if (row.investor_email) await upsertInvestor(row.investor_email, { name: row.investor_name, firm: row.firm, stage: 'Shared' });
-      return { id: row.id, slug };
-    }
-    if (id && sub === 'analytics') {
-      const l = await one('SELECT * FROM links WHERE id=?', id); if (!l) fail(404, 'no link');
-      const decks = []; for (const d of parseDocs(l)) { const s = await pageStats(d, 'AND s.link_id=?', l.id); if (s) decks.push(s); }
-      return { link: { ...l, password_hash: undefined }, visitors: await visitorRows('WHERE v.link_id=?', l.id), decks };
-    }
-    if (id && method === 'PATCH') {
-      const o = linkPayload(b);
-      if ('password' in b) o.password_hash = b.password ? await hash(String(b.password)) : null;
-      if (b.slug) {
-        const s = slugify(b.slug);
-        if (['admin', 'assets', 'index', '404'].includes(s)) fail(400, 'That URL is reserved');
-        if (await one('SELECT id FROM links WHERE slug=? AND id<>?', s, id)) fail(400, 'That URL is taken');
-        if (s) o.slug = s;
-      }
-      const keys = Object.keys(o);
-      if (keys.length) await q(`UPDATE links SET ${keys.map((k) => k + '=?').join(',')} WHERE id=?`, ...keys.map((k) => o[k]), id);
-      return { ok: true };
-    }
-    if (id && method === 'DELETE') { await q('DELETE FROM links WHERE id=?', id); return { ok: true }; }
-  }
-
-  if (res === 'investors' && id && method === 'PATCH') {
-    const e = decodeURIComponent(id).toLowerCase();
-    await upsertInvestor(e);
-    const sets: string[] = [], vals: unknown[] = [];
-    ['name', 'firm', 'stage', 'notes'].forEach((k) => { if (k in b) { sets.push(k + '=?'); vals.push(clean(b[k], 4000)); } });
-    if (sets.length) await q(`UPDATE investors SET ${sets.join(',')}, updated_at=? WHERE email=?`, ...vals, now(), e);
-    return { ok: true };
-  }
-  if (res === 'overview') {
-    const [visitors, sess, docs, events, days, lc] = await Promise.all([
-      visitorRows(),
-      one('SELECT COUNT(*) views, COALESCE(SUM(duration),0) ms FROM sessions'),
-      q('SELECT * FROM documents WHERE version>0 ORDER BY updated_at DESC'),
-      q(`SELECT e.*, v.email, v.name, l.name link_name FROM events e LEFT JOIN visitors v ON v.id=e.visitor_id LEFT JOIN links l ON l.id=e.link_id ORDER BY e.created_at DESC LIMIT 40`),
-      q(`SELECT to_char(to_timestamp(started_at/1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') d, COUNT(*) n, COUNT(DISTINCT visitor_id) u FROM sessions WHERE started_at > ? GROUP BY 1`, now() - 30 * 864e5),
-      one('SELECT COUNT(*) n FROM links WHERE active=1'),
-    ]);
-    const docId = c.url.searchParams.get('doc') || docs[0]?.id;
-    return {
-      kpi: { views: sess.views, visitors: visitors.length, totalMs: sess.ms, avgMs: visitors.length ? sess.ms / visitors.length : 0,
-        avgCompletion: visitors.length ? visitors.reduce((a: number, v: any) => a + v.completion, 0) / visitors.length : 0,
-        hot: visitors.filter((v: any) => v.heat === 'hot').length, links: lc.n },
-      hot: visitors.slice().sort((a: any, b: any) => b.score - a.score).slice(0, 8), events, days, docs, deck: docId ? await pageStats(docId) : null,
-    };
-  }
-  if (res === 'visitors' && !id) {
-    const v = await visitorRows(); const known = new Set(v.map((x: any) => x.email));
-    return { visitors: v, pending: (await q('SELECT * FROM investors')).filter((i) => !known.has(i.email)) };
-  }
-  if (res === 'visitors' && id) {
-    const v = (await visitorRows('WHERE v.id=?', id))[0]; if (!v) fail(404, 'not found');
-    const [sessions, docRows, messages, events] = await Promise.all([
-      q('SELECT * FROM sessions WHERE visitor_id=? ORDER BY started_at DESC', v.id),
-      q('SELECT DISTINCT pt.doc_id FROM page_time pt JOIN sessions s ON s.id=pt.session_id WHERE s.visitor_id=?', v.id),
-      q('SELECT * FROM messages WHERE visitor_id=? ORDER BY created_at DESC', v.id),
-      q('SELECT * FROM events WHERE visitor_id=? ORDER BY created_at DESC LIMIT 100', v.id),
-    ]);
-    const decks = (await Promise.all(docRows.map((r) => pageStats(r.doc_id, 'AND s.visitor_id=?', v.id)))).filter(Boolean);
-    return { visitor: v, sessions, decks, messages, events };
-  }
-  if (res === 'messages') return q(`SELECT m.*, v.email, v.name, l.name link_name, d.name doc_name FROM messages m LEFT JOIN visitors v ON v.id=m.visitor_id LEFT JOIN links l ON l.id=m.link_id LEFT JOIN documents d ON d.id=m.doc_id ORDER BY m.created_at DESC`);
-  if (res === 'export') {
-    const v = await visitorRows();
-    const esc = (x: unknown) => `"${String(x ?? '').replace(/"/g, '""')}"`;
-    const head = ['email', 'name', 'firm', 'stage', 'link', 'visits', 'minutes', 'completion_%', 'score', 'heat', 'country', 'city', 'device', 'downloads', 'messages', 'forwarded', 'first_seen', 'last_seen'];
-    const lines = v.map((r: any) => [r.email, r.name || r.investor?.name, r.investor?.firm, r.investor?.stage, r.link_name, r.visits, (r.ms / 60000).toFixed(1), Math.round(r.completion * 100), r.score, r.heat, r.country, r.city, r.device, r.downloads, r.messages, r.forwarded ? 'yes' : '', new Date(r.first_seen).toISOString(), new Date(r.last_seen).toISOString()].map(esc).join(','));
-    return { csv: [head.join(','), ...lines].join('\n') };
-  }
-  fail(404, 'not found');
-}
+const admin = makeAdmin({ q, one, sql, now, rid, clean, hash, sign, fail, env, store, docAssets, docPrefix, bg, linkPayload, slugify, parseDocs,
+  visitorRows, pageStats, upsertInvestor, sendTo, emailOn, slackOn, SITE, BRAND, ADMIN_PASSWORD });
 
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, content-type, x-dr-viewer, x-dr-device, x-upsert, apikey, x-client-info', 'access-control-allow-methods': 'GET, POST, PATCH, DELETE, PUT, OPTIONS' };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { ...CORS, 'content-type': 'application/json' } });
