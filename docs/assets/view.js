@@ -2,6 +2,7 @@
   const BASE = window.DR_BASE || '/';
   const slug = decodeURIComponent(location.pathname.slice(BASE.length).split('/').filter(Boolean)[0] || '');
   const API = (window.DECKROOM_API || '').replace(/\/$/, '');
+  try { const pc = document.createElement('link'); pc.rel = 'preconnect'; pc.href = new URL(API).origin; pc.crossOrigin = ''; document.head.appendChild(pc); } catch {}
   const ls = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
   let device = ls.get('dr_device'); if (!device) { device = Math.random().toString(36).slice(2) + Date.now().toString(36); ls.set('dr_device', device); }
   const TK = 'dr_t_' + slug;
@@ -51,6 +52,7 @@
 
   // ---------- viewer ----------
   async function startViewer() {
+    const sessP = api('/session', { method: 'POST', body: JSON.stringify({ referrer: document.referrer }) }).catch(() => null);
     try { content = await api('/content'); } catch (e) { if (e.status === 401) { ls.set(TK, null); show($('viewer'), false); return boot(); } show($('gone')); return; }
     if (!content.docs.length) { show($('gone')); return; }
     show($('viewer'));
@@ -60,7 +62,7 @@
       s.onchange = () => { flush(); openDoc(content.docs.find((d) => d.id === s.value)); };
     }
     if (content.cta) { $('ctaBtn').href = content.cta.url; $('ctaLabel').textContent = content.cta.label; show($('ctaBtn')); }
-    const r = await api('/session', { method: 'POST', body: JSON.stringify({ referrer: document.referrer }) });
+    const r = (await sessP) || await api('/session', { method: 'POST', body: JSON.stringify({ referrer: document.referrer }) });
     sessionId = r.sessionId;
     watermark(content.watermark);
     openDoc(content.docs[0]);
@@ -94,6 +96,7 @@
       img.onerror = () => { if (!img._retried) { img._retried = 1; refreshUrls(); } };
       img.src = src(page);
       preload(page + 1); preload(page + 2); preload(page - 1);
+      if (!doc._warm) { doc._warm = 1; const d0 = doc; img.addEventListener('load', () => { let i = 1; const next = () => { if (doc !== d0 || ++i > d0.pages) return; preload(i); setTimeout(next, 250); }; setTimeout(next, 600); }, { once: true }); }
     }
     $('counter').textContent = atEnd ? `End · ${doc.pages} slides` : `${page} / ${doc.pages}`;
     $('prog').style.width = `${(atEnd ? 1 : page / doc.pages) * 100}%`;

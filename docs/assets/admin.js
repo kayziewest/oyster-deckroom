@@ -48,9 +48,9 @@
   };
   $('#logout').onclick = () => { tok.set(null); showLogin(); };
   async function start() {
-    try { ME = await api('/me'); } catch { return; }
+    try { [ME] = await Promise.all([api('/me'), loadDocs()]); } catch { return; }
     $('#login').hidden = true; $('#shell').hidden = false; hydrateIcons();
-    await loadDocs(); route(); refreshMsgCount();
+    route(); refreshMsgCount();
   }
   async function refreshMsgCount() { try { const m = await api('/messages'); const n = m.filter((x) => Date.now() - x.created_at < 7 * 864e5).length; $('#msgCount').textContent = n || ''; } catch {} }
 
@@ -211,7 +211,7 @@
     const ls = await api('/links'); const docs = DOCS;
     const dn = Object.fromEntries(docs.map((d) => [d.id, d.name]));
     $('#main').innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Sharing</p><h1>Links.</h1><p>One link per investor gives the cleanest tracking and forward detection.</p></div><div class="acts"><button class="btn" id="nl">New Link<span class="arr">↗</span></button></div></div>
+      <div class="ph"><div><p class="eyebrow">Sharing</p><h1>Links.</h1><p>One link can go to everyone. Each person who opens it is tracked by their email.</p></div><div class="acts"><button class="btn" id="nl">New Link<span class="arr">↗</span></button></div></div>
       <div class="card"><div class="tw"><table><thead><tr><th>Link</th><th>URL</th><th>Access</th><th>Views</th><th>Time</th><th>Last view</th><th></th></tr></thead><tbody>
       ${ls.map((l) => { const url = `${ME.siteUrl}/${l.slug}`; const exp = l.expires_at && l.expires_at < Date.now();
         return `<tr class="click" data-id="${l.id}"><td><div class="who">${av(l.investor_name || l.name || l.slug)}<div><b>${esc(l.name || l.investor_name || l.slug)}</b><span>${esc([l.firm, l.investor_email, l.doc_ids.map((d) => dn[d]).filter(Boolean).join(', ')].filter(Boolean).join(' · '))}</span></div></div></td>
@@ -246,10 +246,10 @@
     const dt = l.expires_at ? new Date(l.expires_at).toISOString().slice(0, 10) : '';
     openDrawer(`<form class="form" id="lf">
       <div><p class="eyebrow">${edit ? 'Edit link' : 'New link'}</p><h2>${edit ? esc(l.name || l.slug) : 'Share the deck.'}</h2></div>
-      <div class="fs"><b>Recipient</b>
+      <div class="fs"><b>Recipient (optional)</b><p class="muted" style="font-size:12.5px;margin-top:-6px">Leave blank for a link you send to many investors. Fill it in only for a personal link: it prefills their email and flags forwards.</p>
         <div class="two"><label class="fld">Investor name<input name="investor_name" value="${esc(l.investor_name || '')}" placeholder="Tolu Adeyemi"></label><label class="fld">Firm<input name="firm" value="${esc(l.firm || '')}" placeholder="Fund name"></label></div>
         <label class="fld">Investor email <small>Prefills the gate and flags forwards when someone else opens it</small><input name="investor_email" type="email" value="${esc(l.investor_email || '')}" placeholder="tolu@fund.com"></label>
-        <label class="fld">Internal link name <small>Only you see this</small><input name="name" value="${esc(l.name || '')}" placeholder="e.g. Tolu, Fund X, Seed"></label>
+        <label class="fld">Internal link name <small>Only you see this</small><input name="name" value="${esc(l.name || '')}" placeholder="e.g. Seed round, Demo day, Tolu"></label>
       </div>
       <div class="fs"><b>Content</b>
         <div class="docpick">${DOCS.map((d) => `<label><input type="checkbox" name="doc" value="${d.id}" ${l.doc_ids.includes(d.id) ? 'checked' : ''}><img src="${thumb(d.id, 1)}"><span><b>${esc(d.name)}</b><br><span class="muted">${d.pages} slides</span></span></label>`).join('') || '<p class="muted">Upload a deck first.</p>'}</div>
@@ -377,6 +377,7 @@
 
   function preview(docId, p) {
     const d = DOCS.find((x) => x.id === docId) || { id: docId, pages: 40, name: '' };
+    if (!d.pageUrls) api(`/docs/${docId}/pages`).then((r) => { d.pageUrls = r.urls; go(p); }).catch(() => {});
     const go = (n) => {
       p = Math.max(1, Math.min(d.pages, n));
       $('#pvImg').src = (d.pageUrls || [])[p - 1] || thumb(docId, p); $('#pvN').textContent = `${p} / ${d.pages}`;
