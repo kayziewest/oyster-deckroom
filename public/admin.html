@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>DeckRoom · Oyster</title>
+<link rel="icon" href="/static/img/app-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <img class="cloud" src="/static/img/cloud.png" alt="">
+  <form class="login-card" id="loginForm">
+    <img class="wm" src="/static/img/wordmark.png" alt="Oyster">
+    <p class="eyebrow">DeckRoom</p>
+    <h1>Know who read the deck.</h1>
+    <p class="muted">Share the Oyster deck, see every slide they read.</p>
+    <input type="password" name="password" placeholder="Admin password" autofocus>
+    <button class="btn">Sign In<span class="arr">↗</span></button>
+    <p class="err" id="loginErr"></p>
+  </form>
+</div>
+
+<div id="shell" class="shell" hidden>
+  <aside class="side"><div class="side-in">
+    <div class="logo"><img class="wm" src="/static/img/wordmark.png" alt="Oyster"><span class="tag">DeckRoom</span></div>
+    <nav id="nav">
+      <a href="#/" data-r="overview"><i data-i="grid"></i>Overview</a>
+      <a href="#/investors" data-r="investors"><i data-i="users"></i>Investors</a>
+      <a href="#/links" data-r="links"><i data-i="link"></i>Links</a>
+      <a href="#/docs" data-r="docs"><i data-i="file"></i>Decks</a>
+      <a href="#/messages" data-r="messages"><i data-i="chat"></i>Questions <b id="msgCount"></b></a>
+      <a href="#/settings" data-r="settings"><i data-i="gear"></i>Settings</a>
+    </nav>
+    <button class="new" id="newLinkSide">Share the Deck<span class="arr">↗</span></button>
+    <div class="side-foot"><button class="out" id="logout">Sign out</button><span class="sign">Do it with Passion or don't.</span></div>
+  </div></aside>
+  <main id="main" class="main"></main>
+</div>
+
+<div id="drawer" class="drawer" hidden><div class="drawer-bg"></div><div class="drawer-panel" id="drawerPanel"></div></div>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/admin.js"></script>
+</body>
+</html>
