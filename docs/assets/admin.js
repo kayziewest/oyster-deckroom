@@ -17,8 +17,10 @@
   };
   const icon = (n) => `<i data-i="${n}"><svg viewBox="0 0 24 24">${ICONS[n] || ''}</svg></i>`;
   const hydrateIcons = (root = document) => $$('i[data-i]', root).forEach((el) => { if (!el.innerHTML) el.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[el.dataset.i] || ''}</svg>`; });
+  const API = (window.DECKROOM_API || '').replace(/\/$/, '');
+  const tok = { get() { try { return localStorage.getItem('dr_admin'); } catch { return null; } }, set(v) { try { v ? localStorage.setItem('dr_admin', v) : localStorage.removeItem('dr_admin'); } catch {} } };
   const api = async (p, opt = {}) => {
-    const r = await fetch('/api/admin' + p, { headers: opt.body instanceof FormData ? {} : { 'content-type': 'application/json' }, ...opt });
+    const r = await fetch(API + '/admin' + p, { headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (tok.get() || '') }, ...opt });
     if (r.status === 401) { showLogin(); throw new Error('auth'); }
     const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Error'); return j;
   };
@@ -30,7 +32,7 @@
   const avColors = [['#EBCFBE', '#B0451A'], ['#CFDEE8', '#2C6E8F'], ['#CDE0D3', '#3E7C5A'], ['#E6BE9E', '#8a3a12'], ['#DCBFC8', '#8A3F4E'], ['#E4CD97', '#7a570c']];
   const av = (s) => { let h = 0; for (const c of s || '') h = (h * 31 + c.charCodeAt(0)) >>> 0; const [b, f] = avColors[h % avColors.length]; return `<span class="av" style="background:${b};color:${f}">${esc(initials(s))}</span>`; };
   const STAGES = ['Shared', 'Viewed', 'Engaged', 'Meeting', 'Due diligence', 'Committed', 'Passed'];
-  const thumb = (doc, n) => `/api/admin/docs/${doc}/thumb-${n}.jpg`;
+  const thumb = (doc, n) => { const d = DOCS.find((x) => x.id === doc); return (d && d.thumbs && d.thumbs[n - 1]) || ''; };
   const heatChip = (v) => `<span class="chip ${v.heat}">${v.heat === 'hot' ? icon('flame') : ''}${v.heat[0].toUpperCase() + v.heat.slice(1)} · ${v.score}</span>`;
   let ME = null;
 
@@ -38,15 +40,17 @@
   function showLogin() { $('#shell').hidden = true; $('#login').hidden = false; }
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
-    const r = await fetch('/api/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: e.target.password.value }) });
-    if (!r.ok) { $('#loginErr').textContent = 'Wrong password'; return; }
+    let r; try { r = await fetch(API + '/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: e.target.password.value }) }); } catch { $('#loginErr').textContent = 'Cannot reach the server. Check config.js'; return; }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { $('#loginErr').textContent = j.error || 'Wrong password'; return; }
+    tok.set(j.token);
     start();
   };
-  $('#logout').onclick = async () => { await fetch('/api/admin/logout', { method: 'POST' }); showLogin(); };
+  $('#logout').onclick = () => { tok.set(null); showLogin(); };
   async function start() {
     try { ME = await api('/me'); } catch { return; }
     $('#login').hidden = true; $('#shell').hidden = false; hydrateIcons();
-    route(); refreshMsgCount();
+    await loadDocs(); route(); refreshMsgCount();
   }
   async function refreshMsgCount() { try { const m = await api('/messages'); const n = m.filter((x) => Date.now() - x.created_at < 7 * 864e5).length; $('#msgCount').textContent = n || ''; } catch {} }
 
@@ -108,7 +112,7 @@
     const k = d.kpi;
     const evMeta = { open: ['eye', '#CFDEE8', '#2C6E8F', 'opened'], return: ['return', '#E4CD97', '#7a570c', 'came back to'], verified: ['check', '#CDE0D3', '#3E7C5A', 'verified email on'], forwarded: ['forward', '#DCBFC8', '#8A3F4E', 'opened a forwarded link'], download: ['download', '#EBCFBE', '#B0451A', 'downloaded'], message: ['chat', '#EBCFBE', '#B0451A', 'asked a question on'], cta: ['star', '#F1DD93', '#7a570c', 'clicked book a call on'], blocked: ['lock', '#EEE1CF', '#6B4A2F', 'was blocked from'] };
     $('#main').innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Seed round</p><h1>Who is reading the deck.</h1></div><div class="acts"><a class="btn ghost" href="/api/admin/export.csv">${icon('download')}Export CSV</a><button class="btn" id="nl">Share the Deck<span class="arr">↗</span></button></div></div>
+      <div class="ph"><div><p class="eyebrow">Seed round</p><h1>Who is reading the deck.</h1></div><div class="acts"><button class="btn ghost" data-export>${icon('download')}Export CSV</button><button class="btn" id="nl">Share the Deck<span class="arr">↗</span></button></div></div>
       <div class="kpis">
         <div class="kpi t-c"><div class="l">${icon('eye')}Total views</div><div class="v">${k.views}</div><div class="s">${k.links} active links</div></div>
         <div class="kpi t-p"><div class="l">${icon('users')}Unique viewers</div><div class="v">${k.visitors}</div><div class="s">identified by email</div></div>
@@ -143,7 +147,7 @@
     const { visitors, pending } = await api('/visitors');
     const m = $('#main');
     m.innerHTML = `
-      <div class="ph"><div><p class="eyebrow">Pipeline</p><h1>Investors.</h1><p>Everyone who opened a link, ranked by engagement.</p></div><div class="acts"><a class="btn ghost" href="/api/admin/export.csv">${icon('download')}Export CSV</a></div></div>
+      <div class="ph"><div><p class="eyebrow">Pipeline</p><h1>Investors.</h1><p>Everyone who opened a link, ranked by engagement.</p></div><div class="acts"><button class="btn ghost" data-export>${icon('download')}Export CSV</button></div></div>
       <div class="filters"><input id="q" placeholder="Search name, email, firm"><select id="fh"><option value="">All heat</option><option>hot</option><option>warm</option><option>cold</option></select><select id="fs"><option value="">All stages</option>${STAGES.map((s) => `<option>${s}</option>`).join('')}</select><select id="sort"><option value="last">Last seen</option><option value="score">Engagement</option><option value="ms">Time spent</option></select></div>
       <div class="card"><div class="tw"><table><thead><tr><th>Investor</th><th>Engagement</th><th>Stage</th><th>Time</th><th>Completion</th><th>Visits</th><th>Location</th><th>Last seen</th></tr></thead><tbody id="tb"></tbody></table></div></div>
       ${pending.length ? `<div class="card"><h2>Shared, not opened yet. <small>${pending.length}</small></h2><div class="tw"><table><tbody>${pending.map((p) => `<tr><td><div class="who">${av(p.email)}<div><b>${esc(p.name || p.email)}</b><span>${esc(p.firm || p.email)}</span></div></div></td><td><span class="chip off">Not opened</span></td><td class="muted">${ago(p.updated_at)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
@@ -204,12 +208,12 @@
   // ---------- links ----------
   let DOCS = [];
   async function links() {
-    const [ls, docs] = await Promise.all([api('/links'), api('/docs')]); DOCS = docs;
+    const ls = await api('/links'); const docs = DOCS;
     const dn = Object.fromEntries(docs.map((d) => [d.id, d.name]));
     $('#main').innerHTML = `
       <div class="ph"><div><p class="eyebrow">Sharing</p><h1>Links.</h1><p>One link per investor gives the cleanest tracking and forward detection.</p></div><div class="acts"><button class="btn" id="nl">New Link<span class="arr">↗</span></button></div></div>
       <div class="card"><div class="tw"><table><thead><tr><th>Link</th><th>URL</th><th>Access</th><th>Views</th><th>Time</th><th>Last view</th><th></th></tr></thead><tbody>
-      ${ls.map((l) => { const url = `${ME.baseUrl}/v/${l.slug}`; const exp = l.expires_at && l.expires_at < Date.now();
+      ${ls.map((l) => { const url = `${ME.siteUrl}/${l.slug}`; const exp = l.expires_at && l.expires_at < Date.now();
         return `<tr class="click" data-id="${l.id}"><td><div class="who">${av(l.investor_name || l.name || l.slug)}<div><b>${esc(l.name || l.investor_name || l.slug)}</b><span>${esc([l.firm, l.investor_email, l.doc_ids.map((d) => dn[d]).filter(Boolean).join(', ')].filter(Boolean).join(' · '))}</span></div></div></td>
         <td><span class="linkurl" title="${esc(url)}">/v/${esc(l.slug)}</span></td>
         <td><div style="display:flex;gap:4px;flex-wrap:wrap">${!l.active ? '<span class="chip off">Revoked</span>' : exp ? '<span class="chip off">Expired</span>' : '<span class="chip ok">Live</span>'}${l.verify_email ? '<span class="chip cold">Verified email</span>' : l.require_email ? '<span class="chip cold">Email</span>' : '<span class="chip off">Open</span>'}${l.has_password ? `<span class="chip cold">${icon('lock')}</span>` : ''}</div></td>
@@ -225,7 +229,7 @@
   }
   async function linkView(lid) {
     const [d, ls] = await Promise.all([api(`/links/${lid}/analytics`), api('/links')]); const l = d.link; const full = ls.find((x) => x.id === lid);
-    const url = `${ME.baseUrl}/v/${l.slug}`;
+    const url = `${ME.siteUrl}/${l.slug}`;
     $('#main').innerHTML = `
       <div class="ph"><div><p class="eyebrow"><a href="#/links">Links</a></p><h1>${esc(l.name || l.investor_name || l.slug)}</h1><p><span class="linkurl" style="display:inline-flex;max-width:none">${esc(url)}</span></p></div>
       <div class="acts"><button class="btn ghost" id="cp">${icon('copy')}Copy link</button><a class="btn ghost" href="${esc(url)}" target="_blank">${icon('eye')}Open</a><button class="btn" id="ed">Edit settings</button></div></div>
@@ -236,7 +240,7 @@
     $('#ed').onclick = () => linkForm(full);
   }
   async function linkForm(l) {
-    if (!DOCS.length) DOCS = await api('/docs');
+    if (!DOCS.length) await loadDocs();
     const edit = !!(l && l.id); l = Object.assign({ require_email: 1, verify_email: 0, allow_download: 0, watermark: 1, notify: 1, active: 1, doc_ids: DOCS[0] ? [DOCS[0].id] : [], cta_label: 'Book a Call' }, l || {});
     const tg = (k, t, s) => `<label class="tg"><input type="checkbox" name="${k}" ${l[k] ? 'checked' : ''}><span class="sw"></span><div><b>${t}</b><span>${s}</span></div></label>`;
     const dt = l.expires_at ? new Date(l.expires_at).toISOString().slice(0, 10) : '';
@@ -249,7 +253,7 @@
       </div>
       <div class="fs"><b>Content</b>
         <div class="docpick">${DOCS.map((d) => `<label><input type="checkbox" name="doc" value="${d.id}" ${l.doc_ids.includes(d.id) ? 'checked' : ''}><img src="${thumb(d.id, 1)}"><span><b>${esc(d.name)}</b><br><span class="muted">${d.pages} slides</span></span></label>`).join('') || '<p class="muted">Upload a deck first.</p>'}</div>
-        <label class="fld">Custom URL <small>${esc(ME.baseUrl)}/v/</small><input name="slug" value="${esc(l.slug || '')}" placeholder="auto"></label>
+        <label class="fld">Custom URL <small>${esc(ME.siteUrl)}/</small><input name="slug" value="${esc(l.slug || '')}" placeholder="auto"></label>
         <label class="fld">Welcome note on the gate <small>Optional</small><textarea name="message" rows="2" placeholder="Great meeting you today. Here is the deck we discussed.">${esc(l.message || '')}</textarea></label>
       </div>
       <div class="fs"><b>Access</b>
@@ -284,7 +288,7 @@
       try {
         if (edit) { await api('/links/' + l.id, { method: 'PATCH', body: JSON.stringify(b) }); closeDrawer(); toast('Saved'); route(); }
         else {
-          const r = await api('/links', { method: 'POST', body: JSON.stringify(b) }); const url = `${ME.baseUrl}/v/${r.slug}`;
+          const r = await api('/links', { method: 'POST', body: JSON.stringify(b) }); const url = `${ME.siteUrl}/${r.slug}`;
           $('#drawerPanel').innerHTML = `<div class="form"><p class="eyebrow">Link ready</p><h2>Send this to ${esc(b.investor_name || 'your investor')}.</h2><div class="created"><div class="u">${esc(url)}</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn gold" id="cpy">Copy Link<span class="arr">↗</span></button>${b.investor_email ? `<a class="btn ghost" href="mailto:${esc(b.investor_email)}?subject=${encodeURIComponent((ME.brand || 'Oyster') + ' seed deck')}&body=${encodeURIComponent(`Hello ${(b.investor_name || '').split(' ')[0] || 'there'},\n\nHere is our deck: ${url}\n\nHappy to walk you through it.\n\n${ME.sender}`)}">${icon('chat')}Draft email</a>` : ''}<a class="btn ghost" href="${esc(url)}" target="_blank">${icon('eye')}Preview</a></div></div><div class="formacts"><button class="btn" id="dn">Done</button></div></div>`;
           hydrateIcons($('#drawerPanel'));
           $('#cpy').onclick = () => { navigator.clipboard.writeText(url); toast('Link copied'); };
@@ -298,9 +302,58 @@
   $('.drawer-bg').onclick = closeDrawer;
   addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
 
+  // ---------- docs cache + PDF upload (rendered in the browser with pdf.js) ----------
+  async function loadDocs() { DOCS = await api('/docs'); return DOCS; }
+  let pdfjsP = null;
+  function loadPdfjs() {
+    return (pdfjsP ??= new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; res(window.pdfjsLib); };
+      s.onerror = () => rej(new Error('Could not load the PDF reader'));
+      document.head.appendChild(s);
+    }));
+  }
+  const canvasBlob = (c, q) => new Promise((r) => c.toBlob(r, 'image/jpeg', q));
+  async function putFile(url, blob, type) {
+    const r = await fetch(url, { method: 'PUT', body: blob, headers: { 'content-type': type, 'x-upsert': 'true' } });
+    if (!r.ok) throw new Error('Upload failed (' + r.status + ')');
+  }
+  async function uploadPdf(file, replaceId) {
+    const lib = await loadPdfjs();
+    toast('Reading PDF…');
+    const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+    const n = pdf.numPages;
+    const p1 = await pdf.getPage(1); const v1 = p1.getViewport({ scale: 1 }); const ratio = v1.height / v1.width;
+    const name = file.name.replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim();
+    const res = await api('/docs', { method: 'POST', body: JSON.stringify({ name, pages: n, ratio, replaceId }) });
+    for (let i = 1; i <= n; i++) {
+      toast(`Processing slide ${i} of ${n}…`);
+      const page = await pdf.getPage(i);
+      const vp0 = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: 1800 / vp0.width });
+      const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+      const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const big = await canvasBlob(c, 0.86);
+      const t = document.createElement('canvas'); t.width = 360; t.height = Math.round(360 * c.height / c.width);
+      t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
+      const small = await canvasBlob(t, 0.74);
+      await Promise.all([putFile(res.uploads[`page-${i}.jpg`], big, 'image/jpeg'), putFile(res.uploads[`thumb-${i}.jpg`], small, 'image/jpeg')]);
+    }
+    toast('Saving original PDF…');
+    await putFile(res.uploads['original.pdf'], file, 'application/pdf');
+    await api(`/docs/${res.id}/commit`, { method: 'POST', body: JSON.stringify({ version: res.version, pages: n, ratio, name: replaceId ? '' : name }) });
+  }
+  document.addEventListener('click', async (e) => {
+    if (!e.target.closest('[data-export]')) return;
+    const r = await api('/export'); const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([r.csv], { type: 'text/csv' })); a.download = 'deckroom-investors.csv'; a.click();
+  });
+
   // ---------- docs ----------
   async function docs() {
-    DOCS = await api('/docs');
+    await loadDocs();
     $('#main').innerHTML = `
       <div class="ph"><div><p class="eyebrow">Library</p><h1>Decks.</h1><p>Upload a new version anytime. Every existing link updates automatically.</p></div></div>
       <div class="docs">
@@ -308,9 +361,8 @@
         ${DOCS.map((d) => `<div class="doc"><img src="${thumb(d.id, 1)}" data-pv="${d.id}" data-p="1"><div class="b"><h3>${esc(d.name)}</h3><span class="muted">${d.pages} slides · v${d.version} · updated ${ago(d.updated_at)}</span><div class="row"><button class="btn sm" data-share="${d.id}">${icon('share')}Share</button><label class="btn sm ghost">${icon('upload')}New version<input type="file" accept="application/pdf" hidden data-replace="${d.id}"></label><button class="btn sm ghost" data-ren="${d.id}">Rename</button><button class="btn sm danger" data-deld="${d.id}">Delete</button></div></div></div>`).join('')}
       </div>`;
     const up = async (file, replaceId) => {
-      const fd = new FormData(); fd.append('file', file); if (replaceId) fd.append('replaceId', replaceId);
-      toast('Processing slides…');
-      try { await api('/docs', { method: 'POST', body: fd }); toast(replaceId ? 'New version live on all links' : 'Deck uploaded'); route(); } catch (e) { toast(e.message); }
+      if (!/pdf$/i.test(file.type || file.name)) { toast('Upload a PDF'); return; }
+      try { await uploadPdf(file, replaceId); toast(replaceId ? 'New version live on all links' : 'Deck uploaded'); await loadDocs(); route(); } catch (e) { console.error(e); toast(e.message || 'Upload failed'); }
     };
     $('#file').onchange = (e) => e.target.files[0] && up(e.target.files[0]);
     const dz = $('#drop');
@@ -327,7 +379,7 @@
     const d = DOCS.find((x) => x.id === docId) || { id: docId, pages: 40, name: '' };
     const go = (n) => {
       p = Math.max(1, Math.min(d.pages, n));
-      $('#pvImg').src = `/api/admin/docs/${docId}/page-${p}.jpg`; $('#pvN').textContent = `${p} / ${d.pages}`;
+      $('#pvImg').src = (d.pageUrls || [])[p - 1] || thumb(docId, p); $('#pvN').textContent = `${p} / ${d.pages}`;
       $$('.pv-strip img').forEach((im, i) => im.classList.toggle('on', i + 1 === p));
     };
     openDrawer(`<div class="pv"><div class="pv-top"><b>${esc(d.name)}</b><span class="pv-stat" id="pvN"></span><button class="btn sm ghost" id="pvX">Close</button></div><div class="pv-img"><button class="pv-nav" style="left:12px" id="pvP">‹</button><img id="pvImg"><button class="pv-nav" style="right:12px" id="pvNx">›</button></div><div class="pv-strip">${Array.from({ length: d.pages }, (_, i) => `<img src="${thumb(docId, i + 1)}" data-n="${i + 1}">`).join('')}</div></div>`, true);
@@ -335,7 +387,6 @@
     $$('.pv-strip img').forEach((im) => (im.onclick = () => go(+im.dataset.n)));
     go(p);
   }
-  (async () => { try { DOCS = await api('/docs'); } catch {} })();
 
   // ---------- messages ----------
   async function messages() {
@@ -350,10 +401,9 @@
     const st = (ok, t, d) => `<div class="status"><span class="chip ${ok ? 'ok' : 'off'}">${ok ? 'On' : 'Off'}</span><div><b>${t}</b><div class="muted" style="font-size:13px">${d}</div></div></div>`;
     $('#main').innerHTML = `<div class="ph"><div><p class="eyebrow">System</p><h1>Settings.</h1><p>Configured with environment variables on your server.</p></div></div>
       <div class="card"><h2>Status.</h2>
-        ${st(!ME.defaultPassword, 'Admin password', ME.defaultPassword ? 'Still the default. Set <code>ADMIN_PASSWORD</code> before sharing links.' : 'Custom password set.')}
-        ${st(ME.smtp, 'Email (SMTP)', ME.smtp ? `Sending codes and alerts${ME.notifyTo ? ' to ' + esc(ME.notifyTo) : ''}.` : 'Set <code>SMTP_HOST</code>, <code>SMTP_USER</code>, <code>SMTP_PASS</code>, <code>SMTP_FROM</code>, <code>NOTIFY_EMAIL</code>. Needed for email verification codes and alerts.')}
-        ${st(ME.slack, 'Slack alerts', ME.slack ? 'Posting to your webhook.' : 'Set <code>SLACK_WEBHOOK_URL</code> for instant pings in a channel.')}
-        ${st(true, 'Public URL', `Links are built on <code>${esc(ME.baseUrl)}</code>. Change with <code>BASE_URL</code>.`)}
+        ${st(ME.email, 'Email (Resend)', ME.email ? `Sending codes and alerts${ME.notifyTo ? ' to ' + esc(ME.notifyTo) : ''}.` : 'Add <code>RESEND_API_KEY</code>, <code>FROM_EMAIL</code> and <code>NOTIFY_EMAIL</code> to the Edge Function secrets. Needed for email codes and alerts.')}
+        ${st(ME.slack, 'Slack alerts', ME.slack ? 'Posting to your webhook.' : 'Add <code>SLACK_WEBHOOK_URL</code> to the Edge Function secrets for pings in a channel.')}
+        ${st(true, 'Public URL', `Links are built on <code>${esc(ME.siteUrl)}</code>. Change with the <code>SITE_URL</code> secret.`)}
       </div>
       <div class="card"><h2>How tracking works.</h2><p class="muted" style="line-height:1.6">Time counts only while the deck tab is visible and the viewer has interacted in the last two minutes. Completion counts slides viewed for 1.5s or more. Engagement score mixes completion (45), time spent up to 6 minutes (35), return visits (15), a question (5) and a call to action click (5). Forwarding is flagged when a per investor link is opened with a different email. Location comes from the viewer IP.</p></div>`;
   }

@@ -76,6 +76,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .slide img{width:100%;height:100%;object-fit:contain;display:block;opacity:0;transition:opacity .35s var(--e-out);pointer-events:none}
 .slide img.on{opacity:1}
 .shield{position:absolute;inset:0;cursor:pointer}
+.wm-layer{position:absolute;inset:0;pointer-events:none;background-repeat:repeat}
 .spin{position:absolute;left:50%;top:50%;width:28px;height:28px;margin:-14px;border:2.5px solid #eadfcd;border-top-color:var(--orange);border-radius:50%;animation:sp .8s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 .nav{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:48px;border-radius:50%;border:1px solid var(--line-soft);background:var(--mega);display:grid;place-items:center;cursor:pointer;color:var(--ink);box-shadow:var(--sh-sm);transition:opacity .2s,transform .5s var(--e-spring)}

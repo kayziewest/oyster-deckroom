@@ -1,13 +1,20 @@
 (() => {
-  const slug = location.pathname.split('/').filter(Boolean).pop();
-  const api = (p, opt = {}) => fetch(`/api/v/${slug}${p}`, { credentials: 'same-origin', headers: { 'content-type': 'application/json' }, ...opt })
-    .then(async (r) => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(j.error || 'Error'), { status: r.status }); return j; });
+  const BASE = window.DR_BASE || '/';
+  const slug = decodeURIComponent(location.pathname.slice(BASE.length).split('/').filter(Boolean)[0] || '');
+  const API = (window.DECKROOM_API || '').replace(/\/$/, '');
+  const ls = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
+  let device = ls.get('dr_device'); if (!device) { device = Math.random().toString(36).slice(2) + Date.now().toString(36); ls.set('dr_device', device); }
+  const TK = 'dr_t_' + slug;
+  const hdrs = () => { const h = { 'content-type': 'application/json', 'x-dr-device': device }; const t = ls.get(TK); if (t) h['x-dr-viewer'] = t; return h; };
+  const api = (p, opt = {}) => fetch(`${API}/v/${encodeURIComponent(slug)}${p}`, { headers: hdrs(), ...opt })
+    .then(async (r) => { const j = await r.json().catch(() => ({})); if (j.token) ls.set(TK, j.token); if (!r.ok) throw Object.assign(new Error(j.error || 'Error'), { status: r.status }); return j; });
   const $ = (id) => document.getElementById(id);
   const show = (el, on = true) => { el.hidden = !on; };
   let meta, content, sessionId, doc, page = 1, atEnd = false;
 
   // ---------- gate ----------
   async function boot() {
+    if (!slug) { show($('gone')); return; }
     try { meta = await api('/meta'); } catch (e) { show($('gone')); return; }
     document.title = `${meta.title} · ${meta.brand}`;
     if (meta.granted) return startViewer();
@@ -44,7 +51,7 @@
 
   // ---------- viewer ----------
   async function startViewer() {
-    try { content = await api('/content'); } catch (e) { if (e.status === 401) { show($('viewer'), false); return boot(); } show($('gone')); return; }
+    try { content = await api('/content'); } catch (e) { if (e.status === 401) { ls.set(TK, null); show($('viewer'), false); return boot(); } show($('gone')); return; }
     if (!content.docs.length) { show($('gone')); return; }
     show($('viewer'));
     if (meta) document.querySelector('.modal-card .sub').textContent = `Goes straight to ${meta.sender}'s inbox, tagged with this slide.`;
@@ -55,16 +62,27 @@
     if (content.cta) { $('ctaBtn').href = content.cta.url; $('ctaLabel').textContent = content.cta.label; show($('ctaBtn')); }
     const r = await api('/session', { method: 'POST', body: JSON.stringify({ referrer: document.referrer }) });
     sessionId = r.sessionId;
+    watermark(content.watermark);
     openDoc(content.docs[0]);
     setInterval(tick, 1000); setInterval(flush, 8000);
+  }
+  async function refreshUrls() {
+    try { const c = await api('/content'); content.docs = c.docs; const nd = c.docs.find((x) => x.id === doc.id); if (nd) { doc = nd; Object.keys(cache).forEach((k) => delete cache[k]); render(); } } catch {}
+  }
+  function watermark(text) {
+    const el = $('wm'); if (!text) { el.hidden = true; return; }
+    const t = text.replace(/[<>&"]/g, '');
+    const W = Math.round(t.length * 8.6 + 90), H = Math.round(W * 0.42);
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${W}' height='${H}'><text x='${W / 2}' y='${H / 2 + 5}' text-anchor='middle' transform='rotate(-22 ${W / 2} ${H / 2})' font-family='Inter,Arial,sans-serif' font-size='15' fill='%232A1B0E' fill-opacity='0.11'>${t}</text></svg>`;
+    el.style.backgroundImage = `url("data:image/svg+xml;utf8,${svg.replace(/#/g, '%23')}")`; el.style.backgroundSize = `${W}px ${H}px`; el.hidden = false;
   }
   function openDoc(d) {
     doc = d; page = 1; atEnd = false;
     $('vTitle').textContent = d.name; document.title = d.name;
-    if (content.allowDownload) { $('dlBtn').href = `/api/v/${slug}/doc/${d.id}/download`; show($('dlBtn')); }
+    if (content.allowDownload) { $('dlBtn').onclick = async (e) => { e.preventDefault(); try { const r = await api('/download/' + d.id, { method: 'POST' }); location.href = r.url; } catch (err) { alert(err.message); } }; $('dlBtn').href = '#'; show($('dlBtn')); }
     fit(); render();
   }
-  const src = (n) => `/api/v/${slug}/doc/${doc.id}/page/${n}?v=${doc.version}`;
+  const src = (n) => doc.urls[n - 1];
   const cache = {};
   function preload(n) { if (n >= 1 && n <= doc.pages && !cache[doc.id + n]) { const i = new Image(); i.src = src(n); cache[doc.id + n] = i; } }
   function render() {
@@ -73,6 +91,7 @@
     if (!atEnd) {
       img.classList.remove('on'); show($('spin'));
       img.onload = () => { img.classList.add('on'); show($('spin'), false); };
+      img.onerror = () => { if (!img._retried) { img._retried = 1; refreshUrls(); } };
       img.src = src(page);
       preload(page + 1); preload(page + 2); preload(page - 1);
     }
@@ -131,9 +150,10 @@
   function flush(beacon) {
     if (!sessionId) return;
     tick(); const it = items(); if (!it.length) return;
-    const body = JSON.stringify({ sessionId, items: it });
-    if (beacon && navigator.sendBeacon) navigator.sendBeacon(`/api/v/${slug}/track`, new Blob([body], { type: 'text/plain' }));
-    else fetch(`/api/v/${slug}/track`, { method: 'POST', body, headers: { 'content-type': 'application/json' }, keepalive: true }).catch(() => {});
+    const body = JSON.stringify({ sessionId, items: it, token: ls.get(TK) });
+    const url = `${API}/v/${encodeURIComponent(slug)}/track`;
+    if (beacon && navigator.sendBeacon) navigator.sendBeacon(url, new Blob([body], { type: 'text/plain' }));
+    else fetch(url, { method: 'POST', body, headers: hdrs(), keepalive: true }).catch(() => {});
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(true); else lastTick = performance.now(); });
   addEventListener('pagehide', () => flush(true));
